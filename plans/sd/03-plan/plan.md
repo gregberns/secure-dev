@@ -186,7 +186,7 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
 - **Files:**
   - Create: `internal/state/state.go` -- `Manager` interface implementation: `Create()`, `Get()`, `Update()`, `Delete()`, `List()`, `Exists()`. Directory creation with mode 0700, file creation with mode 0600.
   - Create: `internal/state/errors.go` -- `ErrVMNotFound` (state-layer specific)
-- **Key details:** Uses `config.VMConfig` as the persisted type (per design tension #1 resolution). Creates `$SD_HOME/vms/<name>/` with 0700. Writes `config.yaml` with 0600. `Delete()` is best-effort (REQ-001-008). Timestamps in RFC 3339. YAML marshaling via `gopkg.in/yaml.v3`.
+- **Key details:** Uses `config.VMConfig` as the persisted type (per design tension #1 resolution). Creates `$SD_HOME/vms/<name>/` with 0700. Writes `config.yaml` with 0600. `Delete()` is best-effort (REQ-001-008). Timestamps in RFC 3339. YAML marshaling via `gopkg.in/yaml.v3`. File-level advisory locking (`flock`) on `$SD_HOME/vms/<name>/config.yaml` to prevent concurrent `sd` invocations from corrupting state.
 - **Acceptance criteria:**
   - [ ] Create/Get round-trip preserves all VMConfig fields
   - [ ] Directory permissions are 0700, file permissions are 0600
@@ -357,7 +357,7 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
 - **What:** CLI entry point, global flags, dependency wiring, and the `App` struct.
 - **Files:**
   - Create: `internal/cmd/root.go` -- `Execute()`, root cobra.Command, `PersistentPreRunE` (load config, validate --verbose/--quiet mutual exclusivity, init logger, set up output formatter), `App` struct with all dependency fields, `RootFlags`, `VMNamePattern`, `ValidateVMName()`, `resolveVMName()` helper
-- **Key details:** Global flags: `--json`, `--verbose`/`-v`, `--quiet`/`-q`, `--config`, `--vm`. `PersistentPreRunE` constructs the `App` struct. Backend resolved via `backend.Get(cfg.Defaults.Backend)`. Command groups: VM Management, Connection, Configuration, Provisioning, Security, Diagnostics, Utility. Enable prefix matching. `SilenceUsage: true`, `SilenceErrors: true`. Logger: `log/slog` with TextHandler to stderr.
+- **Key details:** Global flags: `--json`, `--verbose`/`-v`, `--quiet`/`-q`, `--config`, `--vm`. `PersistentPreRunE` constructs the `App` struct. Backend resolved via `backend.Get(cfg.Defaults.Backend)`. Command groups: VM Management, Connection, Configuration, Provisioning, Security, Diagnostics, Utility. Enable prefix matching. `SilenceUsage: true`, `SilenceErrors: true`. Logger: `log/slog` with TextHandler to stderr. `PersistentPreRunE` skips config loading and App construction for `version`, `completion`, and `help` commands (name-based check). Phase-7 security fields (`Egress`, `Creds`, `Audit`) are initialized with no-op stubs (`noopAuditLogger`, `noopEgressController`, `noopCredentialInjector`) in `internal/security/noop.go`; replaced with real implementations in Phase 7.
 - **Acceptance criteria:**
   - [ ] `sd` with no args prints help and exits 0
   - [ ] `--verbose --quiet` exits with code 2
@@ -371,15 +371,19 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
 - **What:** VM creation with full lifecycle: validate, resolve backend, build VMConfig, create, provision, write state.
 - **Files:**
   - Create: `internal/cmd/create.go` -- `createCmd` struct, flags: `--backend`, `--cpus`, `--memory`, `--disk`, `--modules`, `--mount`, `--allow-egress`. Implements rollback on failure (destroy partial VM).
-- **Key details:** Data flow per REQ-001-006: ValidateVMName -> Config.GetForVM -> SecurityValidator.ValidateMountPath for each mount -> build backend.VMConfig -> Backend.Create -> Provisioner.Provision -> State.Create -> Audit.LogEvent. On failure: Backend.Destroy for cleanup (using `context.Background()` for rollback). `--dry-run` prints resolved VMConfig without executing.
+- **Key details:** Data flow per REQ-001-006: ValidateVMName -> State.Exists (reject duplicates early) -> Config.GetForVM -> SecurityValidator.ValidateMountPath for each mount -> GenerateKeyPair (must happen before Backend.Create so public key can be included in Lima YAML) -> build backend.VMConfig (include public key path) -> Backend.Create -> capture SSH host key via `ssh-keyscan` and write to `$SD_HOME/vms/<name>/ssh/known_hosts` (REQ-007-004) -> WriteSSHConfig -> Provisioner.Provision -> State.Create -> Audit.LogEvent. On failure: Backend.Destroy for cleanup (using `context.Background()` for rollback). `--dry-run` prints resolved VMConfig without executing. Long help text includes threat model summary per REQ-004-001.
 - **Acceptance criteria:**
   - [ ] `sd create myvm` creates VM with defaults
   - [ ] `sd create myvm --cpus 4 --memory 8GiB` passes flags to backend
   - [ ] `sd create myvm --mount ~/projects:/project` creates read-only mount
   - [ ] `sd create myvm --mount ~:/home` rejected by mount validation
+  - [ ] SSH key pair generated before Backend.Create, public key included in Lima YAML
+  - [ ] SSH host key captured via `ssh-keyscan` after VM start, written to known_hosts
   - [ ] Failed provisioning triggers VM destroy (rollback)
   - [ ] `--json` outputs structured result
-  - [ ] Tests: flag parsing, rollback logic, mount validation integration
+  - [ ] `--modules all` provisions every available module (REQ-006-015)
+  - [ ] Long help text includes threat model summary (REQ-004-001)
+  - [ ] Tests: flag parsing, rollback logic, mount validation integration, host key capture
 - **Dependencies:** 5.1, 2.2, 2.3, 3.2, 4.1, 4.2
 
 **5.3 Implement `sd destroy`, `sd start`, `sd stop` commands**
@@ -388,15 +392,18 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
   - Create: `internal/cmd/destroy.go` -- `--force`, `--no-snapshot`, auto-snapshot before destroy (REQ-004-019), state cleanup, SSH config removal
   - Create: `internal/cmd/start.go` -- start stopped VM
   - Create: `internal/cmd/stop.go` -- stop running VM
-- **Key details:** Destroy flow per REQ-001-008: State.Get -> Backend.Status -> if running && !force: error -> if !noSnapshot: SnapshotCreate -> if running: Stop -> Destroy -> State.Delete -> RemoveSSHConfig -> Audit.LogEvent. Start/Stop are thin wrappers with status check. Idempotent: start on running is no-op, stop on stopped is no-op.
+- **Key details:** Destroy flow per REQ-001-008: State.Get -> Backend.Status -> if running && !force: error -> if !noSnapshot: SnapshotCreate (if snapshot fails and --force: warn and proceed; if snapshot fails and !--force: abort with error requiring `--force --no-snapshot`) -> if running: Stop -> Destroy -> State.Delete -> RemoveSSHConfig -> delete SSH key files at `$SD_HOME/vms/<name>/ssh/` (REQ-004-014) -> Audit.LogEvent. Start/Stop are thin wrappers with status check. Idempotent: start on running is no-op, stop on stopped is no-op.
 - **Acceptance criteria:**
   - [ ] `sd destroy myvm` without `--force` errors on running VM
   - [ ] `sd destroy myvm --force` proceeds
   - [ ] Auto-snapshot before destroy (default behavior)
   - [ ] `--no-snapshot` skips auto-snapshot
   - [ ] State cleanup succeeds even if backend destroy partially fails
+  - [ ] SSH key files deleted from `$SD_HOME/vms/<name>/ssh/` on destroy (REQ-004-014)
+  - [ ] Failed auto-snapshot with --force: warn and proceed
+  - [ ] Failed auto-snapshot without --force: abort with actionable error
   - [ ] Start/stop are idempotent
-  - [ ] Tests: destroy flow, force flag, snapshot behavior
+  - [ ] Tests: destroy flow, force flag, snapshot behavior, key cleanup
 - **Dependencies:** 5.1, 2.2, 3.2, 3.3
 
 **5.4 Implement `sd list` and `sd status` commands**
@@ -414,35 +421,60 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
   - [ ] Tests: output formatting, orphan detection
 - **Dependencies:** 5.1, 2.2, 3.2
 
-**5.5 Implement provisioning engine**
-- **What:** Module system: YAML parsing, dependency resolution, script execution, readiness probes.
+**5.5a Implement provisioning engine core**
+- **What:** Module types, YAML parsing, dependency resolution, and module loading.
 - **Files:**
   - Create: `internal/provision/module.go` -- `Module`, `Script`, `Probe`, `ModuleStatus`, `ProvisionState`, `ModuleExecutionStatus` types, YAML parsing and validation
   - Create: `internal/provision/loader.go` -- load built-in modules via `//go:embed`, discover custom modules from `~/.sd/provisions/`, name conflict detection
-  - Create: `internal/provision/provision.go` -- `Engine` struct implementing `Provisioner` interface, `Provision()`, `ListModules()`, `GetModule()`, `ValidateModules()`
-  - Create: `internal/provision/executor.go` -- execute scripts via `backend.Exec()`, prepend `set -eux -o pipefail`, handle system/user modes
-  - Create: `internal/provision/resolver.go` -- topological sort for dependency ordering, circular dependency detection
-  - Create: `internal/provision/probe.go` -- readiness probe polling with interval and timeout
-  - Create: `internal/provision/modules/base.yaml` -- git, curl, build-essential, ca-certificates, jq, tmux, vim
-  - Create: `internal/provision/modules/claude-code.yaml` -- Node.js via nvm, Claude Code CLI
-  - Create: `internal/provision/modules/docker.yaml` -- Docker Engine rootless
-  - Create: `internal/provision/modules/golang.yaml` -- Go toolchain with checksum
-  - Create: `internal/provision/modules/rust.yaml` -- Rust via rustup
-  - Create: `internal/provision/modules/python.yaml` -- Python 3 with pip and venv
-  - Create: `internal/provision/modules/github-cli.yaml` -- GitHub CLI
-- **Key details:** `base` module always runs first (REQ-006-002). Topological sort via Kahn's algorithm. Circular deps detected before any execution. Scripts executed via `backend.Exec()` (not direct SSH -- enables future backends). `set -eux -o pipefail` prepended to every script. System scripts run as root, user scripts as default user. Checksum verification: download to temp, verify SHA-256, then install (REQ-006-016). No `curl | sh` patterns.
+  - Create: `internal/provision/resolver.go` -- topological sort (Kahn's algorithm) for dependency ordering, circular dependency detection
+  - Create: `internal/provision/state.go` -- `ProvisionState` persistence to `$SD_HOME/vms/<name>/provision-state.yaml`, per-module status tracking (pending/running/completed/failed) for `sd status` to read (REQ-006-009)
+- **Key details:** `base` module always runs first (REQ-006-002). Circular deps detected before any execution. `ProvisionState` written to disk after each module completes so `sd status` can read provisioning progress independently.
 - **Acceptance criteria:**
   - [ ] Module YAML files parse correctly
   - [ ] Topological sort produces correct ordering
   - [ ] Circular dependency A->B->A is caught at validation time
   - [ ] `base` always runs first regardless of module selection
+  - [ ] Custom modules from `~/.sd/provisions/` are discovered
+  - [ ] Name conflict between custom and built-in produces fatal error
+  - [ ] `ProvisionState` written to disk, readable by `sd status`
+  - [ ] Tests: YAML parsing, topo sort, circular detection, state persistence
+- **Dependencies:** 1.3 (for types)
+
+**5.5b Implement provisioning executor and probes**
+- **What:** Script execution via backend.Exec(), readiness probe polling.
+- **Files:**
+  - Create: `internal/provision/provision.go` -- `Engine` struct implementing `Provisioner` interface, `Provision()`, `ListModules()`, `GetModule()`, `ValidateModules()`
+  - Create: `internal/provision/executor.go` -- execute scripts via `backend.Exec()`, prepend `set -eux -o pipefail`, handle system/user modes, update `ProvisionState` after each module
+  - Create: `internal/provision/probe.go` -- readiness probe polling with interval and timeout
+- **Key details:** Scripts executed via `backend.Exec()` (not direct SSH -- enables future backends). `set -eux -o pipefail` prepended to every script. System scripts run as root, user scripts as default user. Checksum verification: download to temp, verify SHA-256, then install (REQ-006-016). No `curl | sh` patterns.
+- **Acceptance criteria:**
   - [ ] `set -eux -o pipefail` is prepended to all scripts
   - [ ] Readiness probes poll at configured interval
   - [ ] Probe timeout produces actionable error
-  - [ ] Custom modules from `~/.sd/provisions/` are discovered
-  - [ ] Name conflict between custom and built-in produces fatal error
-  - [ ] Tests: YAML parsing, topo sort, circular detection, probe timing
-- **Dependencies:** 2.1 (for Exec), 1.3 (for types)
+  - [ ] `ProvisionState` updated after each module execution
+  - [ ] Tests: executor, probe timing, state updates
+- **Dependencies:** 5.5a, 2.1 (for Exec)
+
+**5.5c Implement built-in provisioning modules**
+- **What:** YAML module definitions for all built-in modules.
+- **Files:**
+  - Create: `internal/provision/modules/base.yaml` -- git, curl, build-essential, ca-certificates, jq, tmux, vim. Also: sshd config drop-in at `/etc/ssh/sshd_config.d/sd-security.conf` with `AcceptEnv SD_* ANTHROPIC_* GITHUB_* GH_*` (REQ-004-011, REQ-007-019), `AllowTcpForwarding local`, `GatewayPorts no`, `PermitTunnel no`, `X11Forwarding no` (REQ-004-026), then reload sshd.
+  - Create: `internal/provision/modules/claude-code.yaml` -- Node.js via nvm (pin version + checksum), Claude Code CLI via npm. Git credential helper: write custom credential helper script that reads from `$GITHUB_TOKEN` env var, configure `git config --global credential.helper ""` then `git config --global credential.helper /usr/local/bin/sd-git-credential-helper`, configure `user.name`/`user.email` from host git config, verify `~/.git-credentials` does not exist (REQ-006-012, REQ-004-030). Detect and preserve `CLAUDE.md`/`AGENTS.md` in cloned repos (REQ-006-013).
+  - Create: `internal/provision/modules/docker.yaml` -- Docker Engine rootless (requires newuidmap, kernel namespaces, loginctl configuration). Pin version + checksum. Probe: `docker info`.
+  - Create: `internal/provision/modules/golang.yaml` -- Go toolchain. Pin version (e.g., 1.22.x) + SHA-256 checksum. Install to `/usr/local/go`, add to PATH. Probe: `go version`.
+  - Create: `internal/provision/modules/rust.yaml` -- Rust via rustup. Pin rustup-init checksum. User mode (not root). Probe: `rustc --version`.
+  - Create: `internal/provision/modules/python.yaml` -- Python 3 with pip and venv. System package install. Probe: `python3 --version`.
+  - Create: `internal/provision/modules/github-cli.yaml` -- GitHub CLI from official apt repo. Pin version. Probe: `gh --version`.
+- **Key details:** Each module specifies: version pins, SHA-256 checksums for downloads, system vs user mode, probe command, and dependencies. `base` module includes critical sshd security configuration.
+- **Acceptance criteria:**
+  - [ ] All module YAML files parse and validate
+  - [ ] `base.yaml` configures sshd AcceptEnv and port forwarding restrictions
+  - [ ] `claude-code.yaml` sets up git credential helper from env var (REQ-006-012)
+  - [ ] `claude-code.yaml` clears pre-existing credential helpers and verifies no ~/.git-credentials
+  - [ ] All download modules have SHA-256 checksums
+  - [ ] Each module has a readiness probe command
+  - [ ] Tests: YAML parsing, module validation
+- **Dependencies:** 5.5a
 
 **5.6 Implement `sd version` command**
 - **What:** Version information output.
@@ -475,7 +507,7 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
 - **Files:**
   - Create: `internal/connection/connect.go` -- `Connector` interface implementation, `Connect()` method. Builds SSH command with correct key, host, port, transport, SendEnv args, port forwarding (-L) args. Handles tmux attach/create logic.
   - Create: `internal/connection/tmux.go` -- tmux session management: `tmux new-session -A -s <name>`, new window creation, session name validation (alphanumeric, hyphens, underscores only)
-- **Key details:** Connect flow: resolve VM -> check status -> auto-start if stopped (unless --no-start) -> resolve env vars -> build SSH command -> if no-tmux: direct SSH; else: SSH + `tmux new-session -A -s sd-<name>`. For --new-window: `tmux new-window -t <session>` then attach. Port forwarding: `-L 127.0.0.1:<host>:<guest>` for each forward. SSH command uses `-F /dev/null` to ignore user SSH config and uses only the managed identity.
+- **Key details:** Connect flow: resolve VM -> check status -> auto-start if stopped (unless --no-start) -> resolve env vars -> build SSH command -> if no-tmux: direct SSH; else: SSH + `tmux new-session -A -s sd-<name>`. For --new-window: `tmux new-window -t <session>` then attach. For concurrent connections (REQ-007-020): if session `sd-<name>` already exists, create a new window with `tmux new-window -t sd-<name>` and attach, so each concurrent `sd connect` gets its own tmux window. Port forwarding: `-L 127.0.0.1:<host>:<guest>` for each forward. SSH command builds connection args directly from managed state (identity file, host, port, user, SendEnv) rather than using `-F /dev/null` — for VSOCK transport, the ProxyCommand (`limactl ssh --stdio sd-<name>`) is passed as `-o ProxyCommand=...` on the command line. This avoids the conflict where `-F /dev/null` would discard the VSOCK ProxyCommand from the config fragment.
 - **Acceptance criteria:**
   - [ ] `Connect()` establishes SSH + tmux session
   - [ ] Auto-start works for stopped VMs
@@ -484,7 +516,9 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
   - [ ] `--no-tmux` bypasses tmux
   - [ ] `--new-window` creates new tmux window
   - [ ] `--no-tmux` + `--new-window` is rejected (code 2)
-  - [ ] Tests: SSH command construction, tmux args, mutual exclusivity
+  - [ ] Concurrent connections each get separate tmux windows (REQ-007-020)
+  - [ ] VSOCK transport uses `-o ProxyCommand=...` on command line (not from config fragment)
+  - [ ] Tests: SSH command construction, tmux args, mutual exclusivity, concurrent windows
 - **Dependencies:** 4.1, 4.2, 4.3
 
 **6.2 Implement `sd connect` CLI command**
@@ -551,19 +585,29 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
 
 #### Tasks
 
+**7.0 Spike: Validate iptables/dnsmasq inside Lima VZ**
+- **What:** Verify that iptables and dnsmasq work inside a Lima VM with VZ userspace networking before building the full egress system.
+- **Key details:** Create a minimal Lima VM with VZ backend, install iptables and dnsmasq, verify: (a) iptables OUTPUT chain rules take effect, (b) dnsmasq can bind to 127.0.0.1:53, (c) DNS queries route through dnsmasq, (d) blocked domains actually fail to resolve. If VZ userspace stack doesn't support iptables, document the fallback approach.
+- **Acceptance criteria:**
+  - [ ] Spike results documented (works / doesn't work / partial)
+  - [ ] If iptables doesn't work: fallback approach identified
+- **Dependencies:** 3.2
+
 **7.1 Implement egress control**
-- **What:** iptables rules and dnsmasq-based DNS filtering inside VMs.
+- **What:** Egress rule generation (pure functions) and dnsmasq/iptables script generation. The `security/` package generates scripts but does NOT execute them — execution is done by the CLI layer via `backend.Exec()`.
 - **Files:**
-  - Create: `internal/security/egress.go` -- `EgressController` interface implementation: `ApplyAllowlist()`, `AddDomain()`, `RemoveDomain()`, `ListDomains()`. Generates iptables rules (default DROP, ACCEPT for allowlisted IPs) and dnsmasq config (forward only allowlisted domains).
-- **Key details:** iptables: OUTPUT chain default DROP for new outbound. DNS to 127.0.0.1 only. Block DoH to known providers (8.8.8.8, 1.1.1.1, 9.9.9.9) on port 443. Block DoT (port 853). SSH from host always allowed. dnsmasq: bound to 127.0.0.1:53, forward only allowlisted domains, NXDOMAIN for everything else. Wildcard `*.example.com` matches one subdomain level only (REQ-004-007). Domain re-resolution at configurable interval (default 5 min, REQ-004-010). Scripts executed via `backend.Exec()`.
+  - Create: `internal/security/egress.go` -- `EgressController` interface: `GenerateAllowlistScripts(ctx context.Context, domains []EgressDomain) []backend.ProvisionScript`, `GenerateAddDomainScript(ctx context.Context, domain string) backend.ProvisionScript`, `GenerateRemoveDomainScript(ctx context.Context, domain string) backend.ProvisionScript`, `ListDomains(vmName string) ([]EgressDomain, error)`. Pure functions that return `ProvisionScript` structs; caller executes via `backend.Exec()`.
+- **Key details:** Architecture: `security/egress.go` generates script content as pure functions returning `backend.ProvisionScript`. The CLI layer (e.g., `config_egress.go`) calls `backend.Exec()` to run the generated scripts inside the VM. This keeps `security/` free of the `backend` import. iptables: OUTPUT chain default DROP for new outbound. DNS to 127.0.0.1 only. Block DoH to known providers (8.8.8.8, 1.1.1.1, 9.9.9.9) on port 443. Block DoT (port 853). SSH from host always allowed. dnsmasq: bound to 127.0.0.1:53, forward only allowlisted domains, NXDOMAIN for everything else. Wildcard `*.example.com` matches one subdomain level only (REQ-004-007). Domain re-resolution at configurable interval (default 5 min, REQ-004-010). Installation path: egress scripts are applied during `sd create` as a provisioning step (after base module, as a `security-egress` internal module). dnsmasq runs as a systemd service (`sd-dnsmasq.service`). `AddDomain` post-creation: generates an iptables append + dnsmasq config update script, executed via `backend.Exec()` — works without VM restart. All `EgressController` methods take `context.Context` for cancellability.
 - **Acceptance criteria:**
   - [ ] Default policy is DROP for outbound
   - [ ] Allowlisted domains are resolvable and reachable
   - [ ] `*.githubusercontent.com` matches `raw.githubusercontent.com` but not `a.b.githubusercontent.com`
   - [ ] DNS queries for non-allowlisted domains return NXDOMAIN
-  - [ ] `AddDomain` works without VM restart
-  - [ ] Tests: wildcard matching, iptables rule generation, dnsmasq config generation
-- **Dependencies:** 2.3, 5.5 (provisioning for in-VM execution)
+  - [ ] `AddDomain` works without VM restart (live iptables + dnsmasq update)
+  - [ ] `security/egress.go` does NOT import `backend/` — returns `ProvisionScript` for caller to execute
+  - [ ] dnsmasq installed as systemd service
+  - [ ] Tests: wildcard matching, iptables rule generation, dnsmasq config generation (all pure function tests)
+- **Dependencies:** 7.0 (spike), 2.3, 5.5b (provisioning executor)
 
 **7.2 Implement audit logging**
 - **What:** Command and event logging with SHA-256 hash chain.
@@ -583,7 +627,7 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
 - **What:** `CredentialInjector` for runtime credential injection.
 - **Files:**
   - Create: `internal/security/credentials.go` -- `CredentialInjector` interface implementation: `InjectEnv()`, `Rotate()`, `Revoke()`, `List()`. Resolves `${VAR}` references from VM config, returns resolved map. Never writes to files.
-- **Key details:** `InjectEnv()` reads VM's `env` config, resolves each `${VAR}` from host env, returns map. `Rotate()` updates the `${VAR}` reference in VM config (not the actual value). `Revoke()` removes all env entries from VM config. `List()` returns credential types without values. `ValidateToken()` for classic PAT detection.
+- **Key details:** `InjectEnv()` reads VM's `env` config, resolves each `${VAR}` from host env, returns map. `Rotate()` updates which host environment variable name a `${VAR}` reference points to (e.g., `${GITHUB_TOKEN}` -> `${GITHUB_TOKEN_V2}`), NOT the token value itself — `sd` never stores or handles literal token values, consistent with the credential-never-on-disk security model. `Revoke()` removes all env entries from VM config. `List()` returns credential types without values. `ValidateToken()` for classic PAT detection.
 - **Acceptance criteria:**
   - [ ] `InjectEnv()` resolves all `${VAR}` references
   - [ ] No credential values written to any file
@@ -614,7 +658,7 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
   - Create: `internal/cmd/audit.go` -- `sd audit [vm] --since --json`
   - Create: `internal/cmd/security.go` -- `sd security status <vm>`
   - Create: `internal/cmd/diff.go` -- `sd diff <vm>` detects CI/CD workflow changes
-- **Key details:** `token github setup` outputs PAT creation guidance. `token rotate` updates `${VAR}` reference. `token revoke` removes credentials. `audit` queries audit log with optional VM filter and time range. `security status` shows mounts, egress domains, credentials, snapshots, last audit event, warnings. `diff` detects changes to `.github/workflows/*`, `.gitlab-ci.yml`, `Jenkinsfile`, `.circleci/*`, `.git/hooks/*`.
+- **Key details:** `token github setup` outputs PAT creation guidance including recommended scopes for fine-grained tokens; if token resolves and starts with `ghp_` prefix, warn that classic PATs are not recommended (REQ-004-012) and show the recommended fine-grained token scopes. `--json` output includes `recommended_scopes` field. `token rotate` updates `${VAR}` reference. `token revoke` removes credentials. `audit` queries audit log with optional VM filter and time range. `security status` shows mounts, egress domains, credentials, snapshots, last audit event, warnings. `diff` detects changes to `.github/workflows/*`, `.gitlab-ci.yml`, `Jenkinsfile`, `.circleci/*`, `.git/hooks/*`.
 - **Acceptance criteria:**
   - [ ] `sd token github setup` outputs guidance
   - [ ] `sd audit myvm --since <ts> --json` filters and outputs JSON
@@ -628,17 +672,32 @@ Key architectural decisions that shape the plan: (1) instance-based Viper for te
 - **Files:**
   - Create: `internal/cmd/snapshot.go` -- `sd snapshot create/list/restore/delete`
   - Create: `internal/cmd/provision.go` -- `sd provision [vm] --modules`, `sd provision list`
-  - Create: `internal/cmd/doctor.go` -- checks limactl, ssh, tmux, rsync, config validity, SD_HOME writable, backend availability
-  - Create: `internal/cmd/logs.go` -- `sd logs [name] --tail --follow`
+  - Create: `internal/cmd/doctor.go` -- checks limactl, ssh, tmux, rsync, config validity, SD_HOME writable, backend availability, network connectivity to default egress allowlist endpoints (REQ-002-007)
+  - Create: `internal/cmd/logs.go` -- `sd logs [name] --tail --follow`. Log sources: (1) provisioning output from `$SD_HOME/vms/<name>/provision-state.yaml`, (2) sd audit log filtered by VM name, (3) VM journal via `limactl shell <name> -- journalctl --user -n <N>`. `--tail N` limits to last N entries. `--follow` streams VM journal via `journalctl --follow` exec'd through `backend.Exec()` (long-running, blocks until Ctrl-C).
   - Create: `internal/cmd/completion.go` -- bash/zsh/fish completion generation with custom completers for VM names, backends, snapshot tags, module names
-- **Key details:** `doctor` runs checks with pass/fail indicators. `provision list` shows all modules. `completion` generates shell scripts. Custom completions registered for VM names (from state.List), backend names (from backend.List), module names (from provisioner.ListModules).
+- **Key details:** `doctor` runs checks with pass/fail indicators. Network connectivity check probes each of the 11 default egress allowlist endpoints with a TCP connect or HTTPS HEAD (REQ-002-007). `logs` aggregates three sources and presents chronologically. `provision list` shows all modules. `completion` generates shell scripts. Custom completions registered for VM names (from state.List), backend names (from backend.List), module names (from provisioner.ListModules).
 - **Acceptance criteria:**
   - [ ] `sd snapshot create/list/restore/delete` work
   - [ ] `sd provision list` shows all modules
-  - [ ] `sd doctor` checks all prerequisites
+  - [ ] `sd doctor` checks all prerequisites including network connectivity to egress endpoints
+  - [ ] `sd logs myvm --tail 20` shows last 20 log entries
+  - [ ] `sd logs myvm --follow` streams journal output
   - [ ] `sd completion bash/zsh/fish` outputs valid scripts
   - [ ] All support `--json` where applicable
 - **Dependencies:** 5.1, 5.5, 3.3
+
+**7.7 Implement `sd reset` command**
+- **What:** Reset a VM to a prior snapshot state (REQ-004-019).
+- **Files:**
+  - Create: `internal/cmd/reset.go` -- `sd reset <name> [--snapshot <tag>]`, auto-snapshots before reset (destructive operation per REQ-004-019), restores from specified snapshot or latest.
+- **Key details:** Reset flow: State.Get -> Backend.Status -> auto-snapshot (same logic as destroy) -> SnapshotApply(tag) -> Backend.Start -> Audit.LogEvent. If no `--snapshot` specified, uses the most recent snapshot. `--force` skips auto-snapshot. `--no-snapshot` skips auto-snapshot. Both `--force` and `--no-snapshot` behave identically to `sd destroy` flags.
+- **Acceptance criteria:**
+  - [ ] `sd reset myvm` creates auto-snapshot then restores latest
+  - [ ] `sd reset myvm --snapshot v1` restores specific snapshot
+  - [ ] Auto-snapshot before reset (REQ-004-019)
+  - [ ] `--json` outputs structured result
+  - [ ] Tests: reset flow, snapshot selection
+- **Dependencies:** 5.1, 3.3, 2.2
 
 #### Phase 7 Exit Criteria
 - [ ] All CLI commands from REQ-002-002 through REQ-002-019 are implemented
@@ -841,7 +900,7 @@ Release builds inject version/commit/date via ldflags.
 | 003-vm-backend.md | REQ-003-022: Context Cancellation | P3 | 3.2 |
 | 003-vm-backend.md | REQ-003-023: Credential Isolation | P3 | 3.1 |
 | 003-vm-backend.md | REQ-003-024: Base Image Resolution | P3 | 3.1 |
-| 004-security.md | REQ-004-001: Threat Model | P7 | 7.5 |
+| 004-security.md | REQ-004-001: Threat Model | P5, P7 | 5.2, 7.5 |
 | 004-security.md | REQ-004-002: VM Isolation | P3 | 3.2 |
 | 004-security.md | REQ-004-003: Default No Mounts | P3 | 3.1 |
 | 004-security.md | REQ-004-004: Optional Mounts | P5 | 5.2 |
@@ -859,7 +918,7 @@ Release builds inject version/commit/date via ldflags.
 | 004-security.md | REQ-004-016: GitHub Bot Support | P7 | 7.5 |
 | 004-security.md | REQ-004-017: Protected Branch Integration | P7 | 7.5 |
 | 004-security.md | REQ-004-018: CI Workflow Detection | P7 | 7.5 |
-| 004-security.md | REQ-004-019: Snapshot Before Destructive | P5 | 5.3 |
+| 004-security.md | REQ-004-019: Snapshot Before Destructive | P5, P7 | 5.3, 7.7 |
 | 004-security.md | REQ-004-020: Manual Snapshots | P7 | 7.6 |
 | 004-security.md | REQ-004-021: Audit Command Logging | P7 | 7.2 |
 | 004-security.md | REQ-004-022: Audit VM Events | P7 | 7.2 |
@@ -963,6 +1022,7 @@ internal/
     doctor.go
     version.go
     logs.go
+    reset.go
     completion.go
 
   backend/
@@ -998,6 +1058,7 @@ internal/
     executor.go
     resolver.go
     probe.go
+    state.go
     modules/
       base.yaml
       claude-code.yaml
@@ -1021,6 +1082,7 @@ internal/
     egress.go
     credentials.go
     audit.go
+    noop.go
 
   ui/
     output.go
@@ -1081,13 +1143,14 @@ Makefile
 | `internal/cmd/stop.go` | P5 | 5.3 | sd stop |
 | `internal/cmd/list.go` | P5 | 5.4 | sd list |
 | `internal/cmd/status.go` | P5 | 5.4 | sd status |
-| `internal/provision/module.go` | P5 | 5.5 | Module types |
-| `internal/provision/loader.go` | P5 | 5.5 | Module loading |
-| `internal/provision/provision.go` | P5 | 5.5 | Provisioner engine |
-| `internal/provision/executor.go` | P5 | 5.5 | Script execution |
-| `internal/provision/resolver.go` | P5 | 5.5 | Dependency resolution |
-| `internal/provision/probe.go` | P5 | 5.5 | Readiness probes |
-| `internal/provision/modules/*.yaml` | P5 | 5.5 | Built-in modules (7 files) |
+| `internal/provision/module.go` | P5 | 5.5a | Module types |
+| `internal/provision/loader.go` | P5 | 5.5a | Module loading |
+| `internal/provision/resolver.go` | P5 | 5.5a | Dependency resolution |
+| `internal/provision/state.go` | P5 | 5.5a | Provision state persistence |
+| `internal/provision/provision.go` | P5 | 5.5b | Provisioner engine |
+| `internal/provision/executor.go` | P5 | 5.5b | Script execution |
+| `internal/provision/probe.go` | P5 | 5.5b | Readiness probes |
+| `internal/provision/modules/*.yaml` | P5 | 5.5c | Built-in modules (7 files) |
 | `internal/cmd/version.go` | P5 | 5.6 | sd version |
 | `internal/connection/connect.go` | P6 | 6.1 | Connection manager |
 | `internal/connection/tmux.go` | P6 | 6.1 | tmux session management |
@@ -1096,6 +1159,7 @@ Makefile
 | `internal/connection/sync.go` | P6 | 6.4 | File sync (rsync) |
 | `internal/cmd/sync.go` | P6 | 6.4 | sd sync |
 | `internal/cmd/ssh_config.go` | P6 | 6.5 | sd ssh-config |
+| `internal/security/noop.go` | P5 | 5.1 | No-op stubs for Phase-7 interfaces |
 | `internal/security/egress.go` | P7 | 7.1 | Egress control |
 | `internal/security/audit.go` | P7 | 7.2 | Audit logging |
 | `internal/security/credentials.go` | P7 | 7.3 | Credential management |
@@ -1109,5 +1173,6 @@ Makefile
 | `internal/cmd/provision.go` | P7 | 7.6 | sd provision |
 | `internal/cmd/doctor.go` | P7 | 7.6 | sd doctor |
 | `internal/cmd/logs.go` | P7 | 7.6 | sd logs |
+| `internal/cmd/reset.go` | P7 | 7.7 | sd reset |
 | `internal/cmd/completion.go` | P7 | 7.6 | sd completion |
 | `testdata/scripts/*.txtar` | P8 | 8.2 | Script tests |
