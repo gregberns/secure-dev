@@ -1,0 +1,128 @@
+# AGENTS.md — Secure Dev (sd) Project
+
+This file governs how all coding agents operate in this repository. CLAUDE.md is a symlink to this file.
+
+## Project Overview
+
+`sd` (secure-dev) is a Go CLI tool that creates, configures, and manages secure VM environments for running AI coding agents (Claude Code, etc.) with bypass permissions. It automates VM lifecycle, SSH configuration, tool provisioning, credential injection, and session management.
+
+## Cardinal Rules
+
+1. **Spec-driven development.** Every feature MUST have a corresponding spec in `specs/` BEFORE implementation begins. Code that exists without a spec is a violation and subject to removal.
+2. **No undocumented behavior.** If code does something the spec doesn't describe, either update the spec or remove the code.
+3. **Specs are the source of truth.** When code and spec disagree, the spec wins. Fix the code.
+4. **AI-first design.** Every command supports `--json` output. Every interface is non-interactive by default. Every error message is actionable.
+
+## Repository Structure
+
+```
+AGENTS.md              # This file (CLAUDE.md symlinks here)
+CLAUDE.md              # Symlink -> AGENTS.md
+docs/                  # Research documents, guides, references
+specs/                 # Specifications (source of truth for all features)
+  SPEC_FORMAT.md       # Meta-spec: how specs are written
+  NNN-name.md          # Individual specs (numbered, kebab-case)
+cmd/sd/                # CLI entry point and Cobra commands
+internal/              # All internal packages
+  backend/             # VM backend interface and implementations
+  config/              # Configuration loading and types
+  provision/           # VM provisioning scripts and logic
+  ssh/                 # SSH key and config management
+  session/             # tmux/session management
+  security/            # Egress rules, credential injection
+  ui/                  # Terminal output, styling, JSON formatting
+go.mod
+go.sum
+```
+
+## Spec Workflow
+
+### Writing Specs
+
+1. Read `specs/SPEC_FORMAT.md` for the required structure.
+2. Number specs sequentially: `001-architecture.md`, `002-cli.md`, etc.
+3. Every spec MUST have: Status, Overview, Requirements (with IDs), Interface definitions (where applicable), Error handling, and Testing strategy.
+4. Requirements use the format `REQ-NNN-MMM` where NNN is the spec number and MMM is the requirement number within that spec.
+
+### Reviewing Specs
+
+Before any spec is considered ready for implementation:
+1. At least two independent review agents must review the spec.
+2. Reviews check for: completeness, internal consistency, cross-spec consistency, implementability, security implications, and testability.
+3. All review findings must be resolved in the spec before implementation begins.
+4. Review comments and resolutions are tracked in the spec's revision history section.
+
+### Implementing From Specs
+
+1. Read the spec fully before writing any code.
+2. Reference requirement IDs in code comments where a requirement is fulfilled: `// REQ-002-003: support --json on all commands`
+3. Every public function, interface, and type must trace to a spec requirement.
+4. If implementation reveals a spec gap, STOP and update the spec first. Do not implement undocumented behavior.
+
+## Code Patterns
+
+### Go Conventions
+
+- **Entry point**: `cmd/sd/main.go` — minimal, calls `internal/cmd.Execute()`
+- **CLI framework**: `github.com/spf13/cobra` + `github.com/spf13/viper`
+- **Command files**: One file per command (or command family) in `internal/cmd/`
+- **Large commands**: Split across files by concern: `vm.go`, `vm_create.go`, `vm_helpers.go`
+- **Interfaces over implementations**: Define interfaces in the consumer package, not the provider
+- **Errors**: Sentinel errors with `errors.Is`/`errors.As`. Wrap with context. Never swallow errors silently.
+- **Build tags**: Use for platform-specific code: `_darwin.go`, `_linux.go`
+- **`//go:embed`**: For bundling default configs, provisioning scripts, templates
+- **Testing**: Table-driven tests. `testify` for assertions.
+
+### CLI Conventions
+
+- **All commands support `--json`** for machine-parseable output
+- **Non-interactive by default** — no prompts, no editors, no pagers unless explicitly requested
+- **Command groups** organized by function (VM management, Connection, Configuration, Diagnostics)
+- **Aliases**: Short aliases for common commands (e.g., `c` for `connect`, `ls` for `list`)
+- **Prefix matching enabled** via Cobra
+- **Exit codes**: 0 success, 1 general error, 2 usage error
+- **Stderr for messages, stdout for data** — when `--json` is used, only JSON goes to stdout
+
+### Error Handling
+
+Three error categories:
+1. **Fatal**: Print error, exit non-zero. Use for unrecoverable failures.
+2. **Warning**: Print warning, continue. Use for non-critical issues.
+3. **Silent**: Log only. Use for expected conditions (e.g., "already running").
+
+All errors must be JSON-serializable when `--json` is active.
+
+### Security Patterns
+
+- **Never mount host $HOME** into a VM
+- **Never persist credentials to disk** inside a VM — inject at runtime via environment
+- **Default-deny egress** — allowlist specific endpoints
+- **Scoped tokens only** — no broad PATs, no org-admin tokens
+- **Snapshot before destructive operations**
+
+## Agent Operating Instructions
+
+### Session Protocol
+
+1. **On start**: Read this file. Read relevant specs for your task.
+2. **Before coding**: Verify a spec exists for what you're implementing.
+3. **While coding**: Reference requirement IDs. Run tests frequently.
+4. **Before finishing**: Ensure all changes compile, tests pass, and `go vet` is clean.
+5. **On handoff**: Push your branch. Summarize what was done and what remains.
+
+### What NOT To Do
+
+- Do NOT use interactive commands (editors, pagers, `git add -i`)
+- Do NOT add features not in specs
+- Do NOT use emoji in code, comments, or output (use simple unicode like ✓ ✗ for pass/fail)
+- Do NOT create files outside the defined project structure without updating AGENTS.md
+- Do NOT skip tests or use `-count=1` to hide flaky tests — fix them
+- Do NOT use `-f` flags to force operations without understanding why they're needed
+
+### Dependencies and Tools
+
+- Go 1.22+
+- Lima (for default VM backend)
+- tmux (for session management inside VMs)
+- SSH (OpenSSH client)
+- git
