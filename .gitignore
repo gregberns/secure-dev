@@ -30,3 +30,8 @@ Thumbs.db
 # Build
 dist/
 build/
+
+# Gas Town runtime
+.beads/
+.claude/
+.runtime/
