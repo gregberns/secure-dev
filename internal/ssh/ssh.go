@@ -9,6 +9,7 @@
 package ssh
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -31,6 +32,9 @@ var (
 	ErrInvalidSessionName = errors.New("invalid session name")
 	ErrKeyExists          = errors.New("ssh key already exists")
 	ErrPortOutOfRange     = errors.New("port out of valid range")
+	ErrHostKeyChanged     = errors.New("ssh host key has changed")
+	ErrHostKeyScanFailed  = errors.New("ssh host key scan failed")
+	ErrNoHostKey          = errors.New("no host key stored for vm")
 )
 
 // Session name: alphanumeric, hyphens, underscores only.
@@ -219,6 +223,148 @@ func NeedsInclude(sshConfig []byte) bool {
 		}
 	}
 	return true
+}
+
+// --- REQ-004-031: SSH Host Key Verification ---
+
+// HostKeyScanner scans a host and returns its SSH host keys in known_hosts format.
+// This is the digital twin injection point: tests override this to avoid calling ssh-keyscan.
+var HostKeyScanner = defaultHostKeyScanner
+
+func defaultHostKeyScanner(host string, port int) ([]byte, error) {
+	path, err := exec.LookPath("ssh-keyscan")
+	if err != nil {
+		return nil, fmt.Errorf("%w: ssh-keyscan not found in PATH", ErrHostKeyScanFailed)
+	}
+	out, err := exec.Command(path, "-p", strconv.Itoa(port), host).Output()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrHostKeyScanFailed, err)
+	}
+	return out, nil
+}
+
+// KnownHostsPath returns the path to the per-VM known_hosts file.
+func KnownHostsPath(sdHome, vmName string) string {
+	return filepath.Join(sdHome, "vms", vmName, "ssh", "known_hosts")
+}
+
+// CaptureHostKey scans the VM's SSH server and stores the host key in known_hosts.
+// REQ-004-031: During sd create, the VM's SSH host key is captured and stored.
+func CaptureHostKey(sdHome, vmName, host string, port int) error {
+	keyData, err := HostKeyScanner(host, port)
+	if err != nil {
+		return fmt.Errorf("capture host key for %q: %w", vmName, err)
+	}
+
+	if len(bytes.TrimSpace(keyData)) == 0 {
+		return fmt.Errorf("capture host key for %q: %w: empty response", vmName, ErrHostKeyScanFailed)
+	}
+
+	return StoreHostKey(sdHome, vmName, keyData)
+}
+
+// StoreHostKey writes host key data to the per-VM known_hosts file.
+// The directory is created if it does not exist. The file is overwritten if it exists
+// (e.g., after a VM recreate).
+func StoreHostKey(sdHome, vmName string, keyData []byte) error {
+	path := KnownHostsPath(sdHome, vmName)
+	dir := filepath.Dir(path)
+
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create known_hosts directory: %w", err)
+	}
+
+	if err := os.WriteFile(path, keyData, 0600); err != nil {
+		return fmt.Errorf("write known_hosts: %w", err)
+	}
+
+	return nil
+}
+
+// ReadHostKey reads the stored host key data for a VM.
+// Returns ErrNoHostKey if no host key has been stored.
+func ReadHostKey(sdHome, vmName string) ([]byte, error) {
+	path := KnownHostsPath(sdHome, vmName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrNoHostKey, vmName)
+		}
+		return nil, fmt.Errorf("read known_hosts for %q: %w", vmName, err)
+	}
+	return data, nil
+}
+
+// VerifyHostKey checks whether the given host key data matches what is stored for the VM.
+// REQ-004-031: Detects host key changes (e.g., after a recreate).
+// Returns nil if the key matches, ErrHostKeyChanged if it differs, ErrNoHostKey if none stored.
+func VerifyHostKey(sdHome, vmName string, keyData []byte) error {
+	stored, err := ReadHostKey(sdHome, vmName)
+	if err != nil {
+		return err
+	}
+
+	if !hostKeysMatch(stored, keyData) {
+		return fmt.Errorf("%w: host key for VM %q does not match stored key", ErrHostKeyChanged, vmName)
+	}
+
+	return nil
+}
+
+// hostKeysMatch compares two sets of host key data by parsing known_hosts lines.
+// It compares the key types and base64 key material, ignoring whitespace and comments.
+func hostKeysMatch(stored, candidate []byte) bool {
+	storedKeys := parseHostKeys(stored)
+	candidateKeys := parseHostKeys(candidate)
+
+	if len(storedKeys) == 0 || len(candidateKeys) == 0 {
+		return false
+	}
+
+	// Every candidate key must have a matching stored key.
+	for keyType, keyMaterial := range candidateKeys {
+		storedMaterial, ok := storedKeys[keyType]
+		if !ok || storedMaterial != keyMaterial {
+			return false
+		}
+	}
+
+	// Every stored key must be present in candidate.
+	for keyType, keyMaterial := range storedKeys {
+		candidateMaterial, ok := candidateKeys[keyType]
+		if !ok || candidateMaterial != keyMaterial {
+			return false
+		}
+	}
+
+	return true
+}
+
+// parseHostKeys parses known_hosts format data into a map of key type -> base64 key material.
+// Lines are formatted as: [host] [keytype] [base64key] [optional-comment]
+func parseHostKeys(data []byte) map[string]string {
+	keys := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 3 {
+			keys[fields[1]] = fields[2]
+		}
+	}
+	return keys
+}
+
+// RemoveSSHDir removes the entire SSH directory for a VM (keys, known_hosts, etc.).
+// REQ-004-031: sd destroy removes the stored known_hosts along with SSH key pair.
+func RemoveSSHDir(sdHome, vmName string) error {
+	dir, _, _ := KeyPaths(sdHome, vmName)
+	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove SSH dir for %q: %w", vmName, err)
+	}
+	return nil
 }
 
 // --- REQ-007-007: Port Forwarding ---

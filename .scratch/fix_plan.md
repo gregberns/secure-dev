@@ -197,8 +197,19 @@ REQ-004-009: Egress control is policy-level only.
 ### No local DNS resolver
 REQ-004-025: DNS filtering resolver not implemented.
 
-### No SSH host key verification
-REQ-004-031, REQ-007-004: No code collects/verifies host keys.
+### SSH host key verification implemented (REQ-004-031, REQ-007-004)
+- `internal/ssh/ssh.go` additions: `KnownHostsPath`, `CaptureHostKey`, `StoreHostKey`, `ReadHostKey`, `VerifyHostKey`, `RemoveSSHDir`
+- Injectable `HostKeyScanner` variable for digital twin testing (defaults to `ssh-keyscan`)
+- `hostKeysMatch` compares parsed known_hosts entries by key type + material (host-agnostic)
+- `parseHostKeys` extracts key type -> base64 material map from known_hosts data
+- Sentinel errors: `ErrHostKeyChanged`, `ErrHostKeyScanFailed`, `ErrNoHostKey`
+- `internal/ssh/hostkey_test.go` with 34 tests:
+  - Unit tests: KnownHostsPath, CaptureHostKey (stores, scan fails, empty response), StoreHostKey (creates dir, overwrites), ReadHostKey (no key, returns data), VerifyHostKey (matching, changed, no stored, multiple types, missing type, added type), RemoveSSHDir (cleans up, idempotent, cleans known_hosts), parseHostKeys (basic, multiple, comments, empty, blank)
+  - Digital twin tests: `digitalTwinHostKeyScanner` mock with configurable keys and failure modes, full Capture+Verify lifecycle, Capture+Destroy lifecycle
+  - Integration test: full host key lifecycle (capture -> verify -> change detect -> re-capture -> destroy)
+  - Property tests: Capture round-trip (100 cases x 4 key types), same key always valid (100), different key always fails (100), no key always ErrNoHostKey for Read (100) and Verify (100), KnownHostsPath suffix invariant (100), RemoveSSHDir always succeeds (100), Remove then Read fails (100), Store+Read exact round-trip with 1-4 key types (100), hostKeysMatch symmetric (100), hostKeysMatch different material fails (100)
+
+Still needed: integration with `sd create` command to call CaptureHostKey after VM boot, and `sd connect` to call VerifyHostKey before SSH.
 
 ### No CI workflow change detection
 REQ-004-018: Not implemented.
