@@ -150,8 +150,13 @@ func TestIntegration_SSHConfigRequiresRunning(t *testing.T) {
 }
 
 // TestIntegration_SSHConfigOnRunningVM verifies SSHConfig returns valid details.
-// REQ-003-006
+// REQ-003-006, REQ-007-005
 func TestIntegration_SSHConfigOnRunningVM(t *testing.T) {
+	// Force TCP transport for deterministic assertions
+	orig := isVSOCKTransport
+	isVSOCKTransport = func() bool { return false }
+	defer func() { isVSOCKTransport = orig }()
+
 	b := setupIntegrationTest(t)
 	ctx := context.Background()
 
@@ -167,6 +172,7 @@ func TestIntegration_SSHConfigOnRunningVM(t *testing.T) {
 	assert.False(t, sshCfg.ForwardAgent)
 	assert.Contains(t, sshCfg.IdentityFile, "ssh-vm")
 	assert.Contains(t, sshCfg.IdentityFile, "id_ed25519")
+	assert.Equal(t, "tcp", sshCfg.Transport)
 }
 
 // TestIntegration_ListVMs verifies listing multiple VMs.

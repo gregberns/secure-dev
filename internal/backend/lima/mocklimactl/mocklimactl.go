@@ -21,6 +21,7 @@ const (
 type VMState struct {
 	Name       string    `json:"name"`
 	Status     string    `json:"status"` // creating, running, stopped, error
+	VMType     string    `json:"vmType"` // "vz" or "qemu", REQ-007-005
 	Config     VMConfig  `json:"config"`
 	CreatedAt  time.Time `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
@@ -106,6 +107,7 @@ func createVM(args ...string) (string, error) {
 	vm := &VMState{
 		Name:      name,
 		Status:    "stopped", // Lima creates VMs in stopped state by default
+		VMType:    "qemu",    // Default; tests override via SetVMType
 		Config:    VMConfig{CPUs: 4, Memory: "8GiB", Disk: "100GiB", BaseImage: "ubuntu:24.04"},
 		CreatedAt: time.Now(),
 		Snapshots: []Snapshot{},
@@ -243,7 +245,7 @@ func listVMs(args ...string) (string, error) {
 				Name:      name,
 				Status:    vm.Status,
 				SSH:       ssh,
-				VMType:    "qemu",
+				VMType:    vm.VMType,
 				Arch:      "aarch64",
 				CPUs:      vm.Config.CPUs,
 				Memory:    vm.Config.Memory,
@@ -268,7 +270,7 @@ func listVMs(args ...string) (string, error) {
 			name,
 			vm.Status,
 			ssh,
-			"qemu",
+			vm.VMType,
 			"aarch64",
 			vm.Config.CPUs,
 			vm.Config.Memory,
@@ -585,4 +587,14 @@ func SetVM(name string, vm *VMState) {
 	mu.Lock()
 	defer mu.Unlock()
 	state[name] = vm
+}
+
+// SetVMType updates the VM type (vz/qemu) for a given VM. For test setup.
+// REQ-007-005
+func SetVMType(name, vmType string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if vm, ok := state[name]; ok {
+		vm.VMType = vmType
+	}
 }

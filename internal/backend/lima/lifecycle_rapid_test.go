@@ -613,8 +613,13 @@ func TestProperty_SSHConfigStoppedAlwaysFails(t *testing.T) {
 }
 
 // Property: SSHConfig on a running VM always returns valid config with ForwardAgent=false.
-// REQ-003-006, REQ-004-027
+// REQ-003-006, REQ-004-027, REQ-007-005
 func TestProperty_SSHConfigRunningAlwaysValid(t *testing.T) {
+	// Force TCP for this test so Host is populated
+	orig := isVSOCKTransport
+	isVSOCKTransport = func() bool { return false }
+	defer func() { isVSOCKTransport = orig }()
+
 	rapid.Check(t, func(t *rapid.T) {
 		mocklimactl.Reset()
 		b := newRapidBackend()
@@ -640,6 +645,8 @@ func TestProperty_SSHConfigRunningAlwaysValid(t *testing.T) {
 			"ForwardAgent must always be false (REQ-004-027)")
 		assert.Contains(t, sshCfg.IdentityFile, vmName,
 			"IdentityFile must be per-VM")
+		assert.Equal(t, "tcp", sshCfg.Transport,
+			"Transport must be \"tcp\" when VSOCK not available (REQ-007-005)")
 	})
 }
 
@@ -904,4 +911,116 @@ func TestProperty_ListBackendAlwaysLima(t *testing.T) {
 				"all listed VMs must have Backend='lima'")
 		}
 	})
+}
+
+// --- REQ-007-005: VSOCK/TCP Transport Property Tests ---
+
+// Property: VSOCK transport always sets ProxyCommand and never uses host/port.
+func TestProperty_VSOCKTransportAlwaysHasProxyCommand(t *testing.T) {
+	orig := isVSOCKTransport
+	isVSOCKTransport = func() bool { return true }
+	defer func() { isVSOCKTransport = orig }()
+
+	rapid.Check(t, func(t *rapid.T) {
+		mocklimactl.Reset()
+		b := newRapidBackend()
+		ctx := context.Background()
+		vmName := rapid.StringMatching(`vm-[a-z0-9]{3,8}`).Draw(t, "name")
+
+		cfg := backend.VMConfig{
+			CPUs:      4,
+			Memory:    "8GiB",
+			Disk:      "100GiB",
+			BaseImage: "ubuntu:24.04",
+		}
+
+		require.NoError(t, b.Create(ctx, vmName, cfg))
+		require.NoError(t, b.Start(ctx, vmName))
+
+		sshCfg, err := b.SSHConfig(ctx, vmName)
+		require.NoError(t, err)
+
+		assert.Equal(t, "vsock", sshCfg.Transport,
+			"Transport must be \"vsock\" when VSOCK available")
+		assert.Contains(t, sshCfg.ProxyCommand, "limactl ssh --stdio",
+			"ProxyCommand must use limactl ssh --stdio (REQ-007-005)")
+		assert.Contains(t, sshCfg.ProxyCommand, vmName,
+			"ProxyCommand must include the VM name")
+		assert.False(t, sshCfg.ForwardAgent,
+			"ForwardAgent must always be false")
+	})
+}
+
+// Property: TCP transport always has a valid port and never has ProxyCommand.
+func TestProperty_TCPTransportAlwaysHasPort(t *testing.T) {
+	orig := isVSOCKTransport
+	isVSOCKTransport = func() bool { return false }
+	defer func() { isVSOCKTransport = orig }()
+
+	rapid.Check(t, func(t *rapid.T) {
+		mocklimactl.Reset()
+		b := newRapidBackend()
+		ctx := context.Background()
+		vmName := rapid.StringMatching(`vm-[a-z0-9]{3,8}`).Draw(t, "name")
+
+		cfg := backend.VMConfig{
+			CPUs:      4,
+			Memory:    "8GiB",
+			Disk:      "100GiB",
+			BaseImage: "ubuntu:24.04",
+		}
+
+		require.NoError(t, b.Create(ctx, vmName, cfg))
+		require.NoError(t, b.Start(ctx, vmName))
+
+		sshCfg, err := b.SSHConfig(ctx, vmName)
+		require.NoError(t, err)
+
+		assert.Equal(t, "tcp", sshCfg.Transport,
+			"Transport must be \"tcp\" when VSOCK not available")
+		assert.Empty(t, sshCfg.ProxyCommand,
+			"ProxyCommand must be empty for TCP transport")
+		assert.Equal(t, "127.0.0.1", sshCfg.Host,
+			"TCP transport must use 127.0.0.1")
+		assert.Greater(t, sshCfg.Port, 0,
+			"TCP transport must have a valid port from Lima")
+	})
+}
+
+// Property: Transport is always "tcp" or "vsock", never empty or other values.
+func TestProperty_TransportAlwaysValid(t *testing.T) {
+	for _, vsock := range []bool{true, false} {
+		label := "tcp"
+		if vsock {
+			label = "vsock"
+		}
+		t.Run(label, func(t *testing.T) {
+			orig := isVSOCKTransport
+			isVSOCKTransport = func() bool { return vsock }
+			defer func() { isVSOCKTransport = orig }()
+
+			rapid.Check(t, func(t *rapid.T) {
+				mocklimactl.Reset()
+				b := newRapidBackend()
+				ctx := context.Background()
+				vmName := rapid.StringMatching(`vm-[a-z0-9]{3,8}`).Draw(t, "name")
+
+				cfg := backend.VMConfig{
+					CPUs:      4,
+					Memory:    "8GiB",
+					Disk:      "100GiB",
+					BaseImage: "ubuntu:24.04",
+				}
+
+				require.NoError(t, b.Create(ctx, vmName, cfg))
+				require.NoError(t, b.Start(ctx, vmName))
+
+				sshCfg, err := b.SSHConfig(ctx, vmName)
+				require.NoError(t, err)
+
+				assert.Contains(t, []string{"tcp", "vsock"}, sshCfg.Transport,
+					"Transport must be \"tcp\" or \"vsock\", got %q", sshCfg.Transport)
+			})
+		})
+	}
 }

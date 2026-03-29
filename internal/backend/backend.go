@@ -33,7 +33,7 @@ type VMInfo struct {
 }
 
 // SSHConfig holds the information needed to SSH into a VM.
-// REQ-003-006
+// REQ-003-006, REQ-007-005
 type SSHConfig struct {
 	Host         string `json:"host"`
 	Port         int    `json:"port"`
@@ -41,6 +41,7 @@ type SSHConfig struct {
 	IdentityFile string `json:"identity_file"`
 	ProxyCommand string `json:"proxy_command,omitempty"` // Used for VSOCK transport
 	ForwardAgent bool   `json:"forward_agent"`           // Default: false
+	Transport    string `json:"transport"`               // "tcp" or "vsock", REQ-007-005
 }
 
 // ExecResult holds the result of a command executed inside a VM.

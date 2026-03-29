@@ -209,7 +209,7 @@ func (b *limaBackend) List(ctx context.Context) ([]backend.VMInfo, error) {
 }
 
 // SSHConfig returns SSH connection details for a running VM.
-// REQ-003-006
+// REQ-003-006, REQ-007-005: VSOCK transport on Apple Silicon, TCP fallback otherwise.
 func (b *limaBackend) SSHConfig(ctx context.Context, name string) (backend.SSHConfig, error) {
 	if err := ctx.Err(); err != nil {
 		return backend.SSHConfig{}, fmt.Errorf("sshconfig cancelled for %q: %w", name, err)
@@ -224,15 +224,66 @@ func (b *limaBackend) SSHConfig(ctx context.Context, name string) (backend.SSHCo
 		return backend.SSHConfig{}, fmt.Errorf("vm %q is not running (status: %s): %w", name, status, backend.ErrVMNotRunning)
 	}
 
-	// Default SSH config for Lima
 	homeDir, _ := os.UserHomeDir()
+	identityFile := filepath.Join(homeDir, ".sd", "vms", name, "ssh", "id_ed25519")
+
+	// REQ-007-005: Use VSOCK transport when Lima+VZ is available
+	if isVSOCKTransport() {
+		return backend.SSHConfig{
+			User:         "dev",
+			ProxyCommand: fmt.Sprintf("limactl ssh --stdio %s", name),
+			Transport:    "vsock",
+			IdentityFile: identityFile,
+			ForwardAgent: false,
+		}, nil
+	}
+
+	// TCP transport: retrieve SSH port from Lima
+	port := b.getSSHPort(ctx, name)
+
 	return backend.SSHConfig{
 		Host:         "127.0.0.1",
-		Port:         0, // Lima assigns dynamically
+		Port:         port,
 		User:         "dev",
-		IdentityFile: filepath.Join(homeDir, ".sd", "vms", name, "ssh", "id_ed25519"),
+		IdentityFile: identityFile,
 		ForwardAgent: false,
+		Transport:    "tcp",
 	}, nil
+}
+
+// getSSHPort retrieves the SSH port for a VM from limactl list --json output.
+// REQ-007-005: TCP transport needs the dynamically assigned SSH port.
+func (b *limaBackend) getSSHPort(ctx context.Context, name string) int {
+	if err := ctx.Err(); err != nil {
+		return 0
+	}
+
+	output, err := b.executor.Run("limactl", "list", "--json")
+	if err != nil {
+		return 0
+	}
+
+	var entries []struct {
+		Name string `json:"name"`
+		SSH  string `json:"ssh"`
+	}
+	if err := json.Unmarshal([]byte(output), &entries); err != nil {
+		return 0
+	}
+
+	for _, e := range entries {
+		if e.Name == name && e.SSH != "" {
+			parts := strings.Split(e.SSH, ":")
+			if len(parts) == 2 {
+				var port int
+				if _, err := fmt.Sscanf(parts[1], "%d", &port); err == nil {
+					return port
+				}
+			}
+		}
+	}
+
+	return 0
 }
 
 // Exec runs a command inside the named VM using limactl shell.
@@ -444,6 +495,13 @@ func (b *limaBackend) generateLimaYAML(name string, cfg backend.VMConfig) (strin
 // isAppleSilicon returns true if running on darwin/arm64.
 func isAppleSilicon() bool {
 	return runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
+}
+
+// isVSOCKTransport determines if VSOCK transport should be used.
+// Overridden in tests to force a specific transport mode.
+// REQ-007-005
+var isVSOCKTransport = func() bool {
+	return isAppleSilicon()
 }
 
 // resolveBaseImage resolves a short name to a Lima image URL.

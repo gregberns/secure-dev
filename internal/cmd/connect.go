@@ -308,16 +308,23 @@ func buildSSHArgs(cfg backend.SSHConfig, vmName, session string, noTmux, newWind
 
 	// Host and user
 	host := cfg.Host
-	if host == "" {
-		host = "127.0.0.1"
-	}
 	user := cfg.User
 	if user == "" {
 		user = "dev"
 	}
 
-	args = append(args, "-p", fmt.Sprintf("%d", cfg.Port))
-	args = append(args, fmt.Sprintf("%s@%s", user, host))
+	// REQ-007-005: VSOCK uses ProxyCommand, TCP uses host:port
+	if cfg.ProxyCommand != "" {
+		// VSOCK: target is user@vmname (ProxyCommand handles the connection)
+		args = append(args, fmt.Sprintf("%s@%s", user, vmName))
+	} else {
+		// TCP: use host:port
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		args = append(args, "-p", fmt.Sprintf("%d", cfg.Port))
+		args = append(args, fmt.Sprintf("%s@%s", user, host))
+	}
 
 	// tmux command
 	if !noTmux {

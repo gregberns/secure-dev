@@ -785,6 +785,9 @@ func TestBuildSSHArgs_VSOCKTransport(t *testing.T) {
 
 	assert.Contains(t, args, "ProxyCommand=limactl ssh --stdio myvm")
 	assert.NotContains(t, args, "StrictHostKeyChecking=yes")
+	// REQ-007-005: VSOCK should not include -p flag; target uses VM name
+	assert.NotContains(t, args, "-p")
+	assert.Contains(t, args, "dev@myvm", "VSOCK target should use VM name")
 }
 
 func TestBuildSSHArgs_NoTmux(t *testing.T) {

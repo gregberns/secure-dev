@@ -257,8 +257,14 @@ func TestLimaList_MultipleVMs(t *testing.T) {
 }
 
 // --- REQ-003-006: SSH Configuration ---
+// REQ-007-005: VSOCK/TCP Transport Detection
 
 func TestLimaSSHConfig_RunningVM(t *testing.T) {
+	// Force TCP transport for this test
+	orig := isVSOCKTransport
+	isVSOCKTransport = func() bool { return false }
+	defer func() { isVSOCKTransport = orig }()
+
 	b := newTestBackend(t)
 	ctx := context.Background()
 
@@ -286,6 +292,148 @@ func TestLimaSSHConfig_RunningVM(t *testing.T) {
 	}
 	if sshCfg.ForwardAgent {
 		t.Error("SSHConfig.ForwardAgent = true, want false")
+	}
+	if sshCfg.Transport != "tcp" {
+		t.Errorf("SSHConfig.Transport = %q, want \"tcp\"", sshCfg.Transport)
+	}
+	if sshCfg.Host != "127.0.0.1" {
+		t.Errorf("SSHConfig.Host = %q, want \"127.0.0.1\"", sshCfg.Host)
+	}
+	if sshCfg.Port == 0 {
+		t.Error("SSHConfig.Port = 0, want non-zero SSH port from Lima")
+	}
+}
+
+// REQ-007-005: VSOCK transport uses ProxyCommand on Apple Silicon
+func TestLimaSSHConfig_VSOCKTransport(t *testing.T) {
+	orig := isVSOCKTransport
+	isVSOCKTransport = func() bool { return true }
+	defer func() { isVSOCKTransport = orig }()
+
+	b := newTestBackend(t)
+	ctx := context.Background()
+
+	cfg := backend.VMConfig{
+		CPUs:      4,
+		Memory:    "8GiB",
+		Disk:      "100GiB",
+		BaseImage: "ubuntu:24.04",
+	}
+
+	if err := b.Create(ctx, "vsockvm", cfg); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := b.Start(ctx, "vsockvm"); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	sshCfg, err := b.SSHConfig(ctx, "vsockvm")
+	if err != nil {
+		t.Fatalf("SSHConfig failed: %v", err)
+	}
+
+	// VSOCK must use ProxyCommand
+	if sshCfg.Transport != "vsock" {
+		t.Errorf("SSHConfig.Transport = %q, want \"vsock\"", sshCfg.Transport)
+	}
+	if sshCfg.ProxyCommand != "limactl ssh --stdio vsockvm" {
+		t.Errorf("SSHConfig.ProxyCommand = %q, want \"limactl ssh --stdio vsockvm\"", sshCfg.ProxyCommand)
+	}
+	if sshCfg.User != "dev" {
+		t.Errorf("SSHConfig.User = %q, want \"dev\"", sshCfg.User)
+	}
+	if sshCfg.ForwardAgent {
+		t.Error("SSHConfig.ForwardAgent = true, want false")
+	}
+	if sshCfg.IdentityFile == "" {
+		t.Error("SSHConfig.IdentityFile is empty, want a path")
+	}
+}
+
+// REQ-007-005: TCP transport uses host:port when VSOCK unavailable
+func TestLimaSSHConfig_TCPTransport(t *testing.T) {
+	orig := isVSOCKTransport
+	isVSOCKTransport = func() bool { return false }
+	defer func() { isVSOCKTransport = orig }()
+
+	b := newTestBackend(t)
+	ctx := context.Background()
+
+	cfg := backend.VMConfig{
+		CPUs:      4,
+		Memory:    "8GiB",
+		Disk:      "100GiB",
+		BaseImage: "ubuntu:24.04",
+	}
+
+	if err := b.Create(ctx, "tcpvm", cfg); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := b.Start(ctx, "tcpvm"); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	sshCfg, err := b.SSHConfig(ctx, "tcpvm")
+	if err != nil {
+		t.Fatalf("SSHConfig failed: %v", err)
+	}
+
+	// TCP must use host/port, no ProxyCommand
+	if sshCfg.Transport != "tcp" {
+		t.Errorf("SSHConfig.Transport = %q, want \"tcp\"", sshCfg.Transport)
+	}
+	if sshCfg.ProxyCommand != "" {
+		t.Errorf("SSHConfig.ProxyCommand = %q, want empty for TCP transport", sshCfg.ProxyCommand)
+	}
+	if sshCfg.Host != "127.0.0.1" {
+		t.Errorf("SSHConfig.Host = %q, want \"127.0.0.1\"", sshCfg.Host)
+	}
+	if sshCfg.Port == 0 {
+		t.Error("SSHConfig.Port = 0, want non-zero port from Lima")
+	}
+}
+
+// REQ-007-005: Transport is always set (never empty)
+func TestLimaSSHConfig_TransportAlwaysSet(t *testing.T) {
+	for _, vsock := range []bool{true, false} {
+		label := "tcp"
+		if vsock {
+			label = "vsock"
+		}
+		t.Run(label, func(t *testing.T) {
+			orig := isVSOCKTransport
+			isVSOCKTransport = func() bool { return vsock }
+			defer func() { isVSOCKTransport = orig }()
+
+			b := newTestBackend(t)
+			ctx := context.Background()
+
+			cfg := backend.VMConfig{
+				CPUs:      4,
+				Memory:    "8GiB",
+				Disk:      "100GiB",
+				BaseImage: "ubuntu:24.04",
+			}
+
+			if err := b.Create(ctx, "tvm", cfg); err != nil {
+				t.Fatalf("Create failed: %v", err)
+			}
+			if err := b.Start(ctx, "tvm"); err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+
+			sshCfg, err := b.SSHConfig(ctx, "tvm")
+			if err != nil {
+				t.Fatalf("SSHConfig failed: %v", err)
+			}
+
+			if sshCfg.Transport == "" {
+				t.Error("SSHConfig.Transport is empty, must be \"tcp\" or \"vsock\"")
+			}
+			if sshCfg.Transport != "tcp" && sshCfg.Transport != "vsock" {
+				t.Errorf("SSHConfig.Transport = %q, must be \"tcp\" or \"vsock\"", sshCfg.Transport)
+			}
+		})
 	}
 }
 
