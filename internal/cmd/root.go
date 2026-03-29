@@ -45,18 +45,16 @@ credential injection, and session management.`,
 
 			// REQ-002-015: Load config from --config path
 			configPath, _ := cmd.Flags().GetString("config")
-			sdHome := ""
+			var loaderOpts []config.LoaderOption
 			if configPath != "" {
-				sdHome = configPath
+				loaderOpts = append(loaderOpts, config.WithSDHome(configPath))
 			}
-			loader = config.NewLoader(
-				config.WithSDHome(sdHome),
-			)
+			loader = config.NewLoader(loaderOpts...)
 
 			// Commands that don't require config should still succeed
 			// when config file doesn't exist
 			requiresConfig := true
-			for _, name := range []string{"version", "help", "completion", "doctor", "list", "status", "connect", "ssh-config", "sync"} {
+			for _, name := range []string{"version", "help", "completion", "doctor", "list", "status", "connect", "ssh-config", "sync", "audit"} {
 				if cmd.Name() == name {
 					requiresConfig = false
 					break

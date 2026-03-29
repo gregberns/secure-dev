@@ -119,7 +119,20 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
 - Tests: registration, max args, single VM (human+JSON), all VMs (human+JSON), empty list (human+JSON), VM not found, backend unavailable, backend get error, backend unavailable for all, list error, status error, stopped VM, error status VM, format helpers (full detail, no IP, multiple VMs, empty)
 - Property tests: single VM JSON always valid (5 names x 4 statuses), human contains name (5 names), error codes snake_case (2 codes), all-VMs JSON always valid (empty/single/multiple), all-VMs human has header, table contains all names, JSON required fields, dual-mode consistency
 
-Still missing: config, provision, token, audit, security, diff, logs, completion.
+Still missing: config, provision, token, security, diff, logs, completion.
+
+### Audit command implemented (REQ-002-008, REQ-004-021, REQ-004-022)
+- `internal/cmd/audit.go` with `sd audit [<vm>]` command
+- `--since <timestamp>` flag filters events after ISO 8601 timestamp
+- `--verify` flag validates hash chain integrity
+- Human output: tabular format with timestamp, type, details per entry
+- JSON output: `{"ok": true, "data": [...]}` envelope
+- Error codes: `audit_chain_broken`, `audit_query_failed`, `invalid_argument`
+- Injectable `newAuditLoggerFunc` for digital twin testing
+- Bug fix: root.go PersistentPreRunE no longer passes `WithSDHome("")` which was overriding the default SDHome from environment
+- Added "audit" to no-config-required list in root.go
+- Unit tests: registration, max args, flags, empty log (human+JSON), with entries (human+JSON), filter by VM (human+JSON), since filter (human), verify valid chain (human+JSON), verify broken chain (human+JSON), verify empty log, invalid since format, no SDHome, formatAuditEntries (empty, command, event, event no meta)
+- Property tests: JSON always valid (5 VMs), human output contains VM name (3 VMs), error codes snake_case (3 cases), verify valid chain always succeeds (3 VMs), verify tampered chain always fails (4 tampered hashes), JSON required fields, verify JSON required fields, VM filter excludes non-matching (3 VMs)
 
 ### Sync command implemented (REQ-007-015, REQ-007-016, REQ-007-017)
 - `internal/cmd/sync.go` with `sd sync` parent and 2 subcommands:
