@@ -8,6 +8,7 @@ package lima
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -19,45 +20,34 @@ import (
 func TestLimaYAML_VZDefaultOnAppleSilicon(t *testing.T) {
 	b := New()
 
-	tests := []struct {
-		name       string
-		goos       string
-		goarch     string
-		expectType string
-	}{
-		{"Apple Silicon", "darwin", "arm64", "vz"},
-		{"Intel Mac", "darwin", "amd64", "qemu"},
-		{"Linux ARM", "linux", "arm64", "qemu"},
-		{"Linux x64", "linux", "amd64", "qemu"},
+	cfg := backend.VMConfig{
+		CPUs:       4,
+		Memory:     "8GiB",
+		Disk:       "100GiB",
+		BaseImage:  "ubuntu:24.04",
+		NetworkMode: "",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// For testing, we'll verify the YAML contains the expected vmType
-			cfg := backend.VMConfig{
-				CPUs:       4,
-				Memory:     "8GiB",
-				Disk:       "100GiB",
-				BaseImage:  "ubuntu:24.04",
-				NetworkMode: "",
-			}
+	yaml, err := b.(*limaBackend).generateLimaYAML("testvm", cfg)
+	if err != nil {
+		t.Fatalf("generateLimaYAML failed: %v", err)
+	}
 
-			yaml, err := b.(*limaBackend).generateLimaYAML("testvm", cfg)
-			if err != nil {
-				t.Fatalf("generateLimaYAML failed: %v", err)
-			}
+	// Verify vmType is in YAML
+	if !strings.Contains(yaml, "vmType:") {
+		t.Error("YAML missing vmType field")
+	}
 
-			// Verify vmType is in YAML
-			if !strings.Contains(yaml, "vmType:") {
-				t.Error("YAML missing vmType field")
-			}
-
-			// Parse the vmType value (simple string search for testing)
-			vmTypeLine := findYAMLLine(yaml, "vmType:")
-			if !strings.Contains(vmTypeLine, tt.expectType) {
-				t.Errorf("vmType = %q, want %q", extractYAMLValue(vmTypeLine), tt.expectType)
-			}
-		})
+	// On the current platform, verify the correct vmType
+	vmTypeLine := findYAMLLine(yaml, "vmType:")
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		if !strings.Contains(vmTypeLine, "vz") {
+			t.Errorf("on darwin/arm64, vmType = %q, want \"vz\"", extractYAMLValue(vmTypeLine))
+		}
+	} else {
+		if !strings.Contains(vmTypeLine, "qemu") {
+			t.Errorf("on %s/%s, vmType = %q, want \"qemu\"", runtime.GOOS, runtime.GOARCH, extractYAMLValue(vmTypeLine))
+		}
 	}
 }
 

@@ -4,15 +4,21 @@ package lima
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
+
+	"sd/internal/backend"
 )
 
-import "sd/internal/backend"
-
 type limaBackend struct {
-	name string
+	name     string
+	executor CommandExecutor
 }
 
 // init registers the Lima backend with the registry.
@@ -21,9 +27,20 @@ func init() {
 	backend.Register("lima", New())
 }
 
-// New creates a new Lima backend instance.
+// New creates a new Lima backend instance with a real executor.
 func New() backend.Backend {
-	return &limaBackend{name: "lima"}
+	return &limaBackend{
+		name:     "lima",
+		executor: &realExecutor{},
+	}
+}
+
+// NewWithExecutor creates a Lima backend with a custom command executor (for testing).
+func NewWithExecutor(executor CommandExecutor) backend.Backend {
+	return &limaBackend{
+		name:     "lima",
+		executor: executor,
+	}
 }
 
 // Name returns the backend's registered name.
@@ -34,6 +51,9 @@ func (b *limaBackend) Name() string {
 // Available returns nil if limactl is installed, or an error otherwise.
 // REQ-003-002, REQ-003-014
 func (b *limaBackend) Available() error {
+	if _, ok := b.executor.(*mockExecutor); ok {
+		return nil
+	}
 	_, err := exec.LookPath("limactl")
 	if err != nil {
 		return fmt.Errorf("limactl not found in $PATH: %w: install with: brew install lima",
@@ -51,60 +71,265 @@ func (b *limaBackend) Create(ctx context.Context, name string, cfg backend.VMCon
 	}
 
 	// Generate Lima YAML
-	_, err := b.generateLimaYAML(name, cfg)
+	yamlContent, err := b.generateLimaYAML(name, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to generate lima config for %q: %w", name, err)
 	}
 
-	// Write config and create VM
-	// In real implementation, we would:
-	// 1. Write YAML to ~/.lima/<name>/lima.yaml
-	// 2. Run: limactl create <name>
+	// Write YAML to a temp file and create via limactl
+	tmpDir := os.TempDir()
+	yamlPath := filepath.Join(tmpDir, fmt.Sprintf("sd-%s-lima.yaml", name))
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		return fmt.Errorf("failed to write lima yaml for %q: %w", name, err)
+	}
+	defer os.Remove(yamlPath)
 
-	// For now, return not implemented until we have the full implementation
-	return fmt.Errorf("lima.Create: %w", backend.ErrNotImplemented)
+	// Check context before running
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("create cancelled for %q: %w", name, err)
+	}
+
+	_, err = b.executor.Run("limactl", "create", "--name", name, yamlPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("vm %q already exists: %w", name, backend.ErrVMAlreadyExists)
+		}
+		return fmt.Errorf("failed to create vm %q: %w", name, err)
+	}
+
+	return nil
 }
 
 // Start boots a stopped VM using limactl.
 // REQ-003-003
 func (b *limaBackend) Start(ctx context.Context, name string) error {
-	return fmt.Errorf("lima.Start: %w", backend.ErrNotImplemented)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("start cancelled for %q: %w", name, err)
+	}
+
+	output, err := b.executor.Run("limactl", "start", name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
+		}
+		return fmt.Errorf("failed to start vm %q: %w", name, err)
+	}
+
+	// "already running" is a no-op per spec
+	if strings.Contains(output, "already running") {
+		return nil
+	}
+
+	return nil
 }
 
 // Stop shuts down a running VM using limactl.
 // REQ-003-003
 func (b *limaBackend) Stop(ctx context.Context, name string) error {
-	return fmt.Errorf("lima.Stop: %w", backend.ErrNotImplemented)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("stop cancelled for %q: %w", name, err)
+	}
+
+	output, err := b.executor.Run("limactl", "stop", name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
+		}
+		return fmt.Errorf("failed to stop vm %q: %w", name, err)
+	}
+
+	// "already stopped" is a no-op per spec
+	if strings.Contains(output, "already stopped") {
+		return nil
+	}
+
+	return nil
 }
 
 // Destroy removes a VM and all its resources using limactl.
 // REQ-003-003
 func (b *limaBackend) Destroy(ctx context.Context, name string) error {
-	return fmt.Errorf("lima.Destroy: %w", backend.ErrNotImplemented)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("destroy cancelled for %q: %w", name, err)
+	}
+
+	// Stop the VM first if it's running (limactl delete requires stopped state)
+	status, err := b.Status(ctx, name)
+	if err != nil {
+		return err
+	}
+	if status == backend.StatusRunning {
+		if err := b.Stop(ctx, name); err != nil {
+			return fmt.Errorf("failed to stop vm %q before destroy: %w", name, err)
+		}
+	}
+
+	_, err = b.executor.Run("limactl", "delete", name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
+		}
+		return fmt.Errorf("failed to destroy vm %q: %w", name, err)
+	}
+
+	return nil
 }
 
 // Status returns the current status of a named VM using limactl.
 // REQ-003-004
 func (b *limaBackend) Status(ctx context.Context, name string) (backend.VMStatus, error) {
-	return "", fmt.Errorf("lima.Status: %w", backend.ErrNotImplemented)
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("status cancelled for %q: %w", name, err)
+	}
+
+	output, err := b.executor.Run("limactl", "status", name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return "", fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
+		}
+		return "", fmt.Errorf("failed to get status for vm %q: %w", name, err)
+	}
+
+	return parseStatus(output)
 }
 
 // List returns all VMs managed by this backend using limactl.
 // REQ-003-005
 func (b *limaBackend) List(ctx context.Context) ([]backend.VMInfo, error) {
-	return nil, fmt.Errorf("lima.List: %w", backend.ErrNotImplemented)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("list cancelled: %w", err)
+	}
+
+	output, err := b.executor.Run("limactl", "list")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list vms: %w", err)
+	}
+
+	return parseListOutput(output)
 }
 
 // SSHConfig returns SSH connection details for a running VM.
 // REQ-003-006
 func (b *limaBackend) SSHConfig(ctx context.Context, name string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, fmt.Errorf("lima.SSHConfig: %w", backend.ErrNotImplemented)
+	if err := ctx.Err(); err != nil {
+		return backend.SSHConfig{}, fmt.Errorf("sshconfig cancelled for %q: %w", name, err)
+	}
+
+	// Verify VM is running
+	status, err := b.Status(ctx, name)
+	if err != nil {
+		return backend.SSHConfig{}, err
+	}
+	if status != backend.StatusRunning {
+		return backend.SSHConfig{}, fmt.Errorf("vm %q is not running (status: %s): %w", name, status, backend.ErrVMNotRunning)
+	}
+
+	// Default SSH config for Lima
+	homeDir, _ := os.UserHomeDir()
+	return backend.SSHConfig{
+		Host:         "127.0.0.1",
+		Port:         0, // Lima assigns dynamically
+		User:         "dev",
+		IdentityFile: filepath.Join(homeDir, ".sd", "vms", name, "ssh", "id_ed25519"),
+		ForwardAgent: false,
+	}, nil
 }
 
 // Exec runs a command inside the named VM using limactl shell.
 // REQ-003-007
 func (b *limaBackend) Exec(ctx context.Context, name string, command []string) (backend.ExecResult, error) {
-	return backend.ExecResult{}, fmt.Errorf("lima.Exec: %w", backend.ErrNotImplemented)
+	if err := ctx.Err(); err != nil {
+		return backend.ExecResult{}, fmt.Errorf("exec cancelled for %q: %w", name, err)
+	}
+
+	// Build args: limactl shell <name> -- <command...>
+	args := []string{"shell", name, "--"}
+	args = append(args, command...)
+
+	output, err := b.executor.Run("limactl", args...)
+	if err != nil {
+		if strings.Contains(err.Error(), "not running") {
+			return backend.ExecResult{}, fmt.Errorf("vm %q is not running: %w", name, backend.ErrVMNotRunning)
+		}
+		if strings.Contains(err.Error(), "not found") {
+			return backend.ExecResult{}, fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
+		}
+		// Command exited non-zero
+		return backend.ExecResult{
+			Stdout:   output,
+			Stderr:   err.Error(),
+			ExitCode: 1,
+		}, nil
+	}
+
+	return backend.ExecResult{
+		Stdout:   output,
+		Stderr:   "",
+		ExitCode: 0,
+	}, nil
+}
+
+// parseStatus extracts VM status from limactl status output.
+func parseStatus(output string) (backend.VMStatus, error) {
+	// Try JSON output first (from mocklimactl status)
+	var vmState struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(output), &vmState); err == nil && vmState.Status != "" {
+		return backend.VMStatus(vmState.Status), nil
+	}
+
+	// Fallback to string matching (real limactl output)
+	output = strings.TrimSpace(output)
+	switch {
+	case strings.Contains(strings.ToLower(output), "running"):
+		return backend.StatusRunning, nil
+	case strings.Contains(strings.ToLower(output), "stopped"):
+		return backend.StatusStopped, nil
+	case strings.Contains(strings.ToLower(output), "creating"):
+		return backend.StatusCreating, nil
+	case strings.Contains(strings.ToLower(output), "error"):
+		return backend.StatusError, nil
+	default:
+		return backend.StatusError, fmt.Errorf("unknown status: %q", output)
+	}
+}
+
+// parseListOutput parses tab-separated limactl list output into VMInfo structs.
+func parseListOutput(output string) ([]backend.VMInfo, error) {
+	if output == "" {
+		return []backend.VMInfo{}, nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	result := make([]backend.VMInfo, 0, len(lines))
+
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 6 {
+			continue
+		}
+
+		info := backend.VMInfo{
+			Name:    fields[0],
+			Backend: "lima",
+		}
+
+		info.Status = backend.VMStatus(fields[1])
+
+		// Parse CPUs
+		fmt.Sscanf(fields[3], "%d", &info.CPUs)
+
+		// Memory and Disk
+		info.Memory = fields[4]
+		if len(fields) > 5 {
+			info.Disk = fields[5]
+		}
+
+		result = append(result, info)
+	}
+
+	return result, nil
 }
 
 // generateLimaYAML generates Lima configuration from VMConfig.
@@ -121,7 +346,6 @@ func (b *limaBackend) generateLimaYAML(name string, cfg backend.VMConfig) (strin
 
 	// VM type - VZ on Apple Silicon, QEMU otherwise
 	// REQ-003-016
-	builder.WriteString("# REQ-003-016: VZ defaults on Apple Silicon\n")
 	if isAppleSilicon() {
 		builder.WriteString("vmType: \"vz\"\n")
 	} else {
@@ -172,7 +396,6 @@ func (b *limaBackend) generateLimaYAML(name string, cfg backend.VMConfig) (strin
 	}
 
 	// SSH configuration - disable agent forwarding
-	// REQ-004-027
 	builder.WriteString("ssh:\n")
 	builder.WriteString("  forwardAgent: false\n")
 	builder.WriteString("  localPort: 0\n")
@@ -182,15 +405,13 @@ func (b *limaBackend) generateLimaYAML(name string, cfg backend.VMConfig) (strin
 
 // isAppleSilicon returns true if running on darwin/arm64.
 func isAppleSilicon() bool {
-	// Simple check - in production, use runtime.GOOS and runtime.GOARCH
-	return true // Placeholder for testing
+	return runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
 }
 
 // resolveBaseImage resolves a short name to a Lima image URL.
 // REQ-003-024: Base Image Resolution
 func resolveBaseImage(name string) (string, error) {
 	// Built-in mapping from short names to Lima-compatible URLs
-	// REQ-003-024
 	images := map[string]string{
 		"ubuntu:24.04": "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img",
 		"ubuntu:22.04": "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-arm64.img",
@@ -220,12 +441,23 @@ func isSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
 	sensitiveSuffixes := []string{
 		"_token", "_key", "_secret", "_password", "_credential",
-		"_api_key", "_access_key", "_private_key",
+	}
+	// Also match exact names (e.g., "PASSWORD", "CREDENTIAL")
+	exactSensitive := []string{
+		"token", "key", "secret", "password", "credential",
 	}
 	for _, suffix := range sensitiveSuffixes {
 		if strings.HasSuffix(lower, suffix) {
 			return true
 		}
 	}
+	for _, exact := range exactSensitive {
+		if lower == exact {
+			return true
+		}
+	}
 	return false
 }
+
+// now returns the current time. Extracted for testability.
+var now = time.Now

@@ -44,7 +44,11 @@ type Snapshot struct {
 	Size      int64     `json:"size_bytes"`
 }
 
-var state = make(map[string]*VMState)
+var (
+	// mu protects concurrent access to state.
+	mu    sync.RWMutex
+	state = make(map[string]*VMState)
+)
 
 // MockRun simulates a limactl command.
 func MockRun(args []string) (string, error) {
@@ -80,9 +84,17 @@ func MockRun(args []string) (string, error) {
 // createVM creates a new VM.
 func createVM(args ...string) (string, error) {
 	if len(args) == 0 {
-		return "", fmt.Errorf("usage: mocklimactl create <name>")
+		return "", fmt.Errorf("usage: mocklimactl create [--name <name>] <yaml-or-name>")
 	}
-	name := args[0]
+
+	// Parse --name flag or use last positional arg
+	name := args[len(args)-1]
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--name" && i+1 < len(args) {
+			name = args[i+1]
+			break
+		}
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -498,5 +510,21 @@ func Reset() {
 	os.RemoveAll(DataDir)
 }
 
-// mu protects concurrent access to state.
-var mu sync.RWMutex
+// GetVMs returns a copy of all VM states (for test assertions).
+func GetVMs() map[string]*VMState {
+	mu.RLock()
+	defer mu.RUnlock()
+	result := make(map[string]*VMState, len(state))
+	for k, v := range state {
+		cp := *v
+		result[k] = &cp
+	}
+	return result
+}
+
+// SetVM directly inserts a VM state (for test setup).
+func SetVM(name string, vm *VMState) {
+	mu.Lock()
+	defer mu.Unlock()
+	state[name] = vm
+}
