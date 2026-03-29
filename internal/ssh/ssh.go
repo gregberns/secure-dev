@@ -12,6 +12,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -93,39 +94,20 @@ func GenerateKeys(sdHome, vmName string) error {
 
 // publicKeyToOpenSSH converts an ed25519 public key to OpenSSH authorized_keys format.
 func publicKeyToOpenSSH(pub ed25519.PublicKey) (string, error) {
-	// Use ssh-keygen if available for proper OpenSSH format.
-	// Otherwise, fall back to a manual encoding.
-	return fmt.Sprintf("ssh-ed25519 %s sd-%s", encodeBase64(pub[:]), "generated"), nil
+	// OpenSSH wire format: string("ssh-ed25519") + string(pubkey_bytes)
+	// Each string is length-prefixed as uint32 big-endian.
+	const keyType = "ssh-ed25519"
+	buf := make([]byte, 0, 4+len(keyType)+4+ed25519.PublicKeySize)
+	buf = appendUint32BE(buf, uint32(len(keyType)))
+	buf = append(buf, keyType...)
+	buf = appendUint32BE(buf, uint32(len(pub)))
+	buf = append(buf, pub...)
+	return fmt.Sprintf("ssh-ed25519 %s sd-generated", base64.StdEncoding.EncodeToString(buf)), nil
 }
 
-// encodeBase64 implements raw base64 encoding for SSH keys.
-func encodeBase64(data []byte) string {
-	const table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	var sb strings.Builder
-	for i := 0; i < len(data); i += 3 {
-		b0 := data[i]
-		b1 := byte(0)
-		b2 := byte(0)
-		if i+1 < len(data) {
-			b1 = data[i+1]
-		}
-		if i+2 < len(data) {
-			b2 = data[i+2]
-		}
-		sb.WriteByte(table[(b0>>2)&0x3F])
-		sb.WriteByte(table[((b0<<4)|(b1>>4))&0x3F])
-		switch {
-		case i+1 >= len(data):
-			sb.WriteString("==")
-		case i+2 >= len(data):
-			sb.WriteByte(table[((b1<<4)|(b2>>6))&0x3F])
-			sb.WriteString("=")
-		default:
-			sb.WriteByte(table[((b1<<4)|(b2>>6))&0x3F])
-			sb.WriteByte(table[(b2&0x3F)])
-		}
-	}
-	return sb.String()
+// appendUint32BE appends a big-endian uint32 to buf.
+func appendUint32BE(buf []byte, v uint32) []byte {
+	return append(buf, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
 // KeyFingerprint returns the fingerprint of the public key for a VM.
