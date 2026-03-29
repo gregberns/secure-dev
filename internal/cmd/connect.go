@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/ssh"
 	"sd/internal/ui"
 )
 
@@ -27,6 +28,18 @@ var sessionNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // sshRunner is a function that runs an SSH command. Overridden in tests.
 var sshRunner = defaultSSHRunner
+
+// scanAndVerifyHostKey scans the VM's current host key and verifies it against the stored key.
+// Overridden in tests with a digital twin.
+var scanAndVerifyHostKey = defaultScanAndVerifyHostKey
+
+func defaultScanAndVerifyHostKey(sdHome, vmName, host string, port int) error {
+	keyData, err := ssh.HostKeyScanner(host, port)
+	if err != nil {
+		return fmt.Errorf("scan host key for %q: %w", vmName, err)
+	}
+	return ssh.VerifyHostKey(sdHome, vmName, keyData)
+}
 
 func defaultSSHRunner(name string, args []string) error {
 	cmd := exec.Command(name, args...)
@@ -188,6 +201,22 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return ui.CLIError{
 			Code:    "ssh_connection_failed",
 			Message: fmt.Sprintf("failed to get SSH config for VM %q: %v", name, err),
+		}
+	}
+
+	// REQ-004-031: Verify SSH host key for TCP connections before running SSH
+	if sshCfg.Transport == "tcp" {
+		if l := Loader(); l != nil {
+			sdHome := l.SDHome()
+			if err := scanAndVerifyHostKey(sdHome, name, sshCfg.Host, sshCfg.Port); err != nil {
+				if errors.Is(err, ssh.ErrHostKeyChanged) {
+					return ui.CLIError{
+						Code:    "ssh_host_key_changed",
+						Message: fmt.Sprintf("SECURITY: SSH host key for VM %q has changed. This could indicate a MITM attack or the VM was recreated. Run \"sd destroy %s && sd create %s\" to reset.", name, name, name),
+					}
+				}
+				// Other errors (scan failed, no stored key) are non-fatal
+			}
 		}
 	}
 

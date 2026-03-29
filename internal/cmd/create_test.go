@@ -51,6 +51,7 @@ type mockCreateBackend struct {
 	available bool
 	created   []createCall
 	err       error // error to return from Create
+	sshCfg    backend.SSHConfig
 }
 
 type createCall struct {
@@ -82,7 +83,7 @@ func (m *mockCreateBackend) List(_ context.Context) ([]backend.VMInfo, error) {
 	return nil, nil
 }
 func (m *mockCreateBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
+	return m.sshCfg, nil
 }
 func (m *mockCreateBackend) Exec(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
 	return backend.ExecResult{}, nil
@@ -602,4 +603,159 @@ func TestProperty_ErrorCodesSnakeCase(t *testing.T) {
 	require.Error(t, err2)
 	cliErr2 := err2.(ui.CLIError)
 	assert.Equal(t, "backend_unavailable", cliErr2.Code)
+}
+
+// --- Host key capture tests (REQ-004-031) ---
+
+func TestCreateCommand_HostKeyCapture_TCP(t *testing.T) {
+	mb := &mockCreateBackend{
+		name:      "mock",
+		available: true,
+		sshCfg: backend.SSHConfig{
+			Host:      "127.0.0.1",
+			Port:      60022,
+			User:      "dev",
+			Transport: "tcp",
+		},
+	}
+	setupCreateTest(t, mb)
+
+	captureCalled := false
+	origCapture := captureHostKey
+	captureHostKey = func(sdHome, vmName, host string, port int) error {
+		captureCalled = true
+		assert.Equal(t, "testvm", vmName)
+		assert.Equal(t, "127.0.0.1", host)
+		assert.Equal(t, 60022, port)
+		return nil
+	}
+	defer func() { captureHostKey = origCapture }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	assert.True(t, captureCalled, "captureHostKey must be called for TCP transport")
+}
+
+func TestCreateCommand_HostKeyCapture_VSOCK_Skipped(t *testing.T) {
+	mb := &mockCreateBackend{
+		name:      "mock",
+		available: true,
+		sshCfg: backend.SSHConfig{
+			User:         "dev",
+			ProxyCommand: "limactl ssh --stdio testvm",
+			Transport:    "vsock",
+		},
+	}
+	setupCreateTest(t, mb)
+
+	captureCalled := false
+	origCapture := captureHostKey
+	captureHostKey = func(sdHome, vmName, host string, port int) error {
+		captureCalled = true
+		return nil
+	}
+	defer func() { captureHostKey = origCapture }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	assert.False(t, captureCalled, "captureHostKey must NOT be called for VSOCK transport")
+}
+
+func TestCreateCommand_HostKeyCapture_Failure_NonFatal(t *testing.T) {
+	mb := &mockCreateBackend{
+		name:      "mock",
+		available: true,
+		sshCfg: backend.SSHConfig{
+			Host:      "127.0.0.1",
+			Port:      60022,
+			Transport: "tcp",
+		},
+	}
+	setupCreateTest(t, mb)
+
+	origCapture := captureHostKey
+	captureHostKey = func(sdHome, vmName, host string, port int) error {
+		return fmt.Errorf("ssh-keyscan failed: connection refused")
+	}
+	defer func() { captureHostKey = origCapture }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm"})
+	err := root.Execute()
+
+	// Create should still succeed even if host key capture fails
+	require.NoError(t, err)
+	require.Len(t, mb.created, 1)
+}
+
+func TestCreateCommand_HostKeyCapture_EmptyTransport_Skipped(t *testing.T) {
+	mb := &mockCreateBackend{
+		name:      "mock",
+		available: true,
+		sshCfg:    backend.SSHConfig{}, // empty transport
+	}
+	setupCreateTest(t, mb)
+
+	captureCalled := false
+	origCapture := captureHostKey
+	captureHostKey = func(sdHome, vmName, host string, port int) error {
+		captureCalled = true
+		return nil
+	}
+	defer func() { captureHostKey = origCapture }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	assert.False(t, captureCalled, "captureHostKey must not be called with empty transport")
+}
+
+// Property: TCP transport always attempts host key capture
+func TestProperty_Create_TCP_AlwaysCapturesHostKey(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+		port int
+	}{
+		{"vm1", "127.0.0.1", 60022},
+		{"vm2", "192.168.1.1", 22},
+		{"vm3", "10.0.0.1", 2222},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mb := &mockCreateBackend{
+				name:      "mock",
+				available: true,
+				sshCfg: backend.SSHConfig{
+					Host:      tc.host,
+					Port:      tc.port,
+					Transport: "tcp",
+				},
+			}
+			setupCreateTest(t, mb)
+
+			captured := false
+			origCapture := captureHostKey
+			captureHostKey = func(sdHome, vmName, host string, port int) error {
+				captured = true
+				return nil
+			}
+			defer func() { captureHostKey = origCapture }()
+
+			root := RootCmd()
+			root.SetArgs([]string{"create", tc.name})
+			err := root.Execute()
+
+			require.NoError(t, err)
+			assert.True(t, captured, "TCP transport must attempt host key capture for %q", tc.name)
+		})
+	}
 }

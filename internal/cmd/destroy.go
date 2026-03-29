@@ -8,8 +8,13 @@ import (
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/ssh"
 	"sd/internal/ui"
 )
+
+// removeSSHDir removes the SSH directory for a VM (keys, known_hosts, etc.).
+// Overridden in tests with a digital twin.
+var removeSSHDir = ssh.RemoveSSHDir
 
 func init() {
 	destroyCmd := &cobra.Command{
@@ -93,6 +98,14 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		return ui.CLIError{
 			Code:    "vm_destroy_failed",
 			Message: fmt.Sprintf("failed to destroy VM %q: %v", name, err),
+		}
+	}
+
+	// REQ-004-031: Clean up SSH keys and known_hosts
+	if l := Loader(); l != nil {
+		sdHome := l.SDHome()
+		if err := removeSSHDir(sdHome, name); err != nil {
+			f.Progress(fmt.Sprintf("Warning: failed to clean up SSH directory: %v", err))
 		}
 	}
 

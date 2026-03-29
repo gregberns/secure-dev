@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/ssh"
 	"sd/internal/ui"
 )
 
@@ -1177,4 +1178,262 @@ func TestProperty_Connect_AlwaysForwardX11No(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "SSH args must include ForwardX11=no")
+}
+
+// --- REQ-004-031: Host key verification tests ---
+
+func TestConnectCommand_TCP_HostKeyVerified(t *testing.T) {
+	mb := &mockConnectBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		sshConfig: backend.SSHConfig{
+			Host:         "127.0.0.1",
+			Port:         60022,
+			User:         "dev",
+			IdentityFile: "/keys/id_ed25519",
+			Transport:    "tcp",
+		},
+	}
+	setupConnectTest(t, mb)
+
+	verified := false
+	origVerify := scanAndVerifyHostKey
+	scanAndVerifyHostKey = func(sdHome, vmName, host string, port int) error {
+		verified = true
+		return nil
+	}
+	defer func() { scanAndVerifyHostKey = origVerify }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"connect", "myvm"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	assert.True(t, verified, "TCP transport must verify host key")
+}
+
+func TestConnectCommand_TCP_HostKeyChanged(t *testing.T) {
+	mb := &mockConnectBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		sshConfig: backend.SSHConfig{
+			Host:         "127.0.0.1",
+			Port:         60022,
+			User:         "dev",
+			IdentityFile: "/keys/id_ed25519",
+			Transport:    "tcp",
+		},
+	}
+	setupConnectTest(t, mb)
+
+	origVerify := scanAndVerifyHostKey
+	scanAndVerifyHostKey = func(sdHome, vmName, host string, port int) error {
+		return ssh.ErrHostKeyChanged
+	}
+	defer func() { scanAndVerifyHostKey = origVerify }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"connect", "myvm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "ssh_host_key_changed", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "SECURITY")
+	assert.Contains(t, cliErr.Message, "myvm")
+	assert.Contains(t, cliErr.Message, "sd destroy")
+}
+
+func TestConnectCommand_TCP_NoStoredKey_NonFatal(t *testing.T) {
+	mb := &mockConnectBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		sshConfig: backend.SSHConfig{
+			Host:         "127.0.0.1",
+			Port:         60022,
+			User:         "dev",
+			IdentityFile: "/keys/id_ed25519",
+			Transport:    "tcp",
+		},
+	}
+	setupConnectTest(t, mb)
+
+	origVerify := scanAndVerifyHostKey
+	scanAndVerifyHostKey = func(sdHome, vmName, host string, port int) error {
+		return ssh.ErrNoHostKey
+	}
+	defer func() { scanAndVerifyHostKey = origVerify }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"connect", "myvm"})
+	err := root.Execute()
+
+	require.NoError(t, err, "no stored key should be non-fatal")
+}
+
+func TestConnectCommand_TCP_ScanFails_NonFatal(t *testing.T) {
+	mb := &mockConnectBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		sshConfig: backend.SSHConfig{
+			Host:         "127.0.0.1",
+			Port:         60022,
+			User:         "dev",
+			IdentityFile: "/keys/id_ed25519",
+			Transport:    "tcp",
+		},
+	}
+	setupConnectTest(t, mb)
+
+	origVerify := scanAndVerifyHostKey
+	scanAndVerifyHostKey = func(sdHome, vmName, host string, port int) error {
+		return fmt.Errorf("network unreachable")
+	}
+	defer func() { scanAndVerifyHostKey = origVerify }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"connect", "myvm"})
+	err := root.Execute()
+
+	require.NoError(t, err, "scan failure should be non-fatal")
+}
+
+func TestConnectCommand_VSOCK_SkipsVerification(t *testing.T) {
+	mb := &mockConnectBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		sshConfig: backend.SSHConfig{
+			User:         "dev",
+			IdentityFile: "/keys/id_ed25519",
+			ProxyCommand: "limactl ssh --stdio myvm",
+			Transport:    "vsock",
+		},
+	}
+	setupConnectTest(t, mb)
+
+	verified := false
+	origVerify := scanAndVerifyHostKey
+	scanAndVerifyHostKey = func(sdHome, vmName, host string, port int) error {
+		verified = true
+		return nil
+	}
+	defer func() { scanAndVerifyHostKey = origVerify }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"connect", "myvm"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	assert.False(t, verified, "VSOCK transport must skip host key verification")
+}
+
+// Property: TCP transport always verifies host key, VSOCK never does.
+func TestProperty_Connect_TCPAlwaysVerifies_VSOCKNeverVerifies(t *testing.T) {
+	t.Run("tcp_always_verifies", func(t *testing.T) {
+		for _, name := range []string{"vm1", "vm2", "vm3"} {
+			t.Run(name, func(t *testing.T) {
+				mb := &mockConnectBackend{
+					name:      "mock",
+					available: true,
+					statusMap: map[string]backend.VMStatus{name: backend.StatusRunning},
+					sshConfig: backend.SSHConfig{
+						Host:      "127.0.0.1",
+						Port:      60022,
+						User:      "dev",
+						Transport: "tcp",
+					},
+				}
+				setupConnectTest(t, mb)
+
+				verified := false
+				origVerify := scanAndVerifyHostKey
+				scanAndVerifyHostKey = func(sdHome, vmName, host string, port int) error {
+					verified = true
+					return nil
+				}
+				defer func() { scanAndVerifyHostKey = origVerify }()
+
+				root := RootCmd()
+				root.SetArgs([]string{"connect", name})
+				err := root.Execute()
+
+				require.NoError(t, err)
+				assert.True(t, verified, "TCP transport must verify host key for %q", name)
+			})
+		}
+	})
+
+	t.Run("vsock_never_verifies", func(t *testing.T) {
+		for _, name := range []string{"vm1", "vm2", "vm3"} {
+			t.Run(name, func(t *testing.T) {
+				mb := &mockConnectBackend{
+					name:      "mock",
+					available: true,
+					statusMap: map[string]backend.VMStatus{name: backend.StatusRunning},
+					sshConfig: backend.SSHConfig{
+						User:         "dev",
+						ProxyCommand: "limactl ssh --stdio " + name,
+						Transport:    "vsock",
+					},
+				}
+				setupConnectTest(t, mb)
+
+				verified := false
+				origVerify := scanAndVerifyHostKey
+				scanAndVerifyHostKey = func(sdHome, vmName, host string, port int) error {
+					verified = true
+					return nil
+				}
+				defer func() { scanAndVerifyHostKey = origVerify }()
+
+				root := RootCmd()
+				root.SetArgs([]string{"connect", name})
+				err := root.Execute()
+
+				require.NoError(t, err)
+				assert.False(t, verified, "VSOCK transport must not verify host key for %q", name)
+			})
+		}
+	})
+}
+
+// Property: host key changed always returns ssh_host_key_changed error code.
+func TestProperty_Connect_HostKeyChanged_ErrorCode(t *testing.T) {
+	for _, name := range []string{"vm1", "vm2", "vm3"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockConnectBackend{
+				name:      "mock",
+				available: true,
+				statusMap: map[string]backend.VMStatus{name: backend.StatusRunning},
+				sshConfig: backend.SSHConfig{
+					Host:      "127.0.0.1",
+					Port:      60022,
+					User:      "dev",
+					Transport: "tcp",
+				},
+			}
+			setupConnectTest(t, mb)
+
+			origVerify := scanAndVerifyHostKey
+			scanAndVerifyHostKey = func(sdHome, vmName, host string, port int) error {
+				return ssh.ErrHostKeyChanged
+			}
+			defer func() { scanAndVerifyHostKey = origVerify }()
+
+			root := RootCmd()
+			root.SetArgs([]string{"connect", name})
+			err := root.Execute()
+
+			require.Error(t, err)
+			cliErr := err.(ui.CLIError)
+			assert.Equal(t, "ssh_host_key_changed", cliErr.Code, "must use ssh_host_key_changed error code for %q", name)
+			assert.Contains(t, cliErr.Message, "SECURITY")
+		})
+	}
 }

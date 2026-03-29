@@ -492,3 +492,91 @@ func TestProperty_DestroyErrorJSONFormat(t *testing.T) {
 	assert.Equal(t, "invalid_argument", cliErr.Code)
 	assert.Contains(t, cliErr.Message, "--force")
 }
+
+// --- REQ-004-031: SSH cleanup tests ---
+
+func TestDestroyCommand_CleansUpSSHDir(t *testing.T) {
+	mb := &mockDestroyBackend{name: "mock", available: true}
+	setupDestroyTest(t, mb)
+
+	cleaned := false
+	origRemove := removeSSHDir
+	removeSSHDir = func(sdHome, vmName string) error {
+		cleaned = true
+		return nil
+	}
+	defer func() { removeSSHDir = origRemove }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"destroy", "testvm", "--force"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	assert.True(t, cleaned, "destroy must clean up SSH directory")
+}
+
+func TestDestroyCommand_SSHCleanupFailure_NonFatal(t *testing.T) {
+	mb := &mockDestroyBackend{name: "mock", available: true}
+	setupDestroyTest(t, mb)
+
+	origRemove := removeSSHDir
+	removeSSHDir = func(sdHome, vmName string) error {
+		return fmt.Errorf("permission denied")
+	}
+	defer func() { removeSSHDir = origRemove }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"destroy", "testvm", "--force"})
+	err := root.Execute()
+
+	// Destroy should still succeed despite SSH cleanup failure
+	require.NoError(t, err)
+	require.Len(t, mb.destroyed, 1, "backend Destroy must still be called")
+}
+
+// Property: destroy always attempts SSH directory cleanup.
+func TestProperty_Destroy_AlwaysCleansSSHDir(t *testing.T) {
+	for _, name := range []string{"vm1", "vm2", "test-vm"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockDestroyBackend{name: "mock", available: true}
+			setupDestroyTest(t, mb)
+
+			cleaned := false
+			origRemove := removeSSHDir
+			removeSSHDir = func(sdHome, vmName string) error {
+				cleaned = true
+				return nil
+			}
+			defer func() { removeSSHDir = origRemove }()
+
+			root := RootCmd()
+			root.SetArgs([]string{"destroy", name, "--force"})
+			err := root.Execute()
+
+			require.NoError(t, err)
+			assert.True(t, cleaned, "destroy must attempt SSH cleanup for %q", name)
+		})
+	}
+}
+
+// Property: SSH cleanup failure never prevents destroy from succeeding.
+func TestProperty_Destroy_SSHCleanupFailureNonFatal(t *testing.T) {
+	for _, name := range []string{"vm1", "vm2", "vm3"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockDestroyBackend{name: "mock", available: true}
+			setupDestroyTest(t, mb)
+
+			origRemove := removeSSHDir
+			removeSSHDir = func(sdHome, vmName string) error {
+				return fmt.Errorf("simulated failure")
+			}
+			defer func() { removeSSHDir = origRemove }()
+
+			root := RootCmd()
+			root.SetArgs([]string{"destroy", name, "--force"})
+			err := root.Execute()
+
+			require.NoError(t, err, "destroy must succeed despite SSH cleanup failure for %q", name)
+		})
+	}
+}

@@ -9,8 +9,13 @@ import (
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/ssh"
 	"sd/internal/ui"
 )
+
+// captureHostKey captures the VM's SSH host key after creation.
+// Overridden in tests with a digital twin.
+var captureHostKey = ssh.CaptureHostKey
 
 func init() {
 	createCmd := &cobra.Command{
@@ -102,6 +107,18 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return ui.CLIError{
 			Code:    "vm_create_failed",
 			Message: fmt.Sprintf("failed to create VM %q: %v", name, err),
+		}
+	}
+
+	// REQ-004-031: Capture SSH host key for TCP-based connections
+	if l := Loader(); l != nil {
+		sdHome := l.SDHome()
+		if sshCfg, err := b.SSHConfig(cmd.Context(), name); err == nil {
+			if sshCfg.Transport == "tcp" && sshCfg.Host != "" && sshCfg.Port > 0 {
+				if hkErr := captureHostKey(sdHome, name, sshCfg.Host, sshCfg.Port); hkErr != nil {
+					f.Progress(fmt.Sprintf("Warning: could not capture SSH host key: %v", hkErr))
+				}
+			}
 		}
 	}
 
