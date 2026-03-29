@@ -119,7 +119,18 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
 - Tests: registration, max args, single VM (human+JSON), all VMs (human+JSON), empty list (human+JSON), VM not found, backend unavailable, backend get error, backend unavailable for all, list error, status error, stopped VM, error status VM, format helpers (full detail, no IP, multiple VMs, empty)
 - Property tests: single VM JSON always valid (5 names x 4 statuses), human contains name (5 names), error codes snake_case (2 codes), all-VMs JSON always valid (empty/single/multiple), all-VMs human has header, table contains all names, JSON required fields, dual-mode consistency
 
-Still missing: sync, config, provision, token, audit, security, diff, doctor, logs, completion.
+Still missing: sync, config, provision, token, audit, security, diff, logs, completion.
+
+### Doctor command implemented (REQ-002-007)
+- `internal/cmd/doctor.go` with `sd doctor` command
+- Checks: required binaries (limactl, ssh, tmux, rsync), configuration validity, VM backend availability
+- Human output: pass/fail indicators (checkmark/ballot X) per check
+- JSON output: `{"ok": true, "data": [{"name": ..., "status": "pass"|"fail", "message": ...}]}` array
+- Works without config file (in "no config required" set)
+- Injectable `lookPath` variable for digital twin testing
+- Error code: `doctor_check_failed` when any check fails in human mode; JSON mode always succeeds
+- `mockDoctorBackend` digital twin implementing `backend.Backend` with configurable `Available()` behavior
+- Tests: registration, human output (all pass, some fail), JSON output (all pass, some fail), no config required, rejects extra args, unit tests (checkBinary found/not found, formatDoctorOutput empty/mixed/all pass/all fail), property tests (JSON always valid 3 cases, human contains all check names, error code snake_case)
 
 ### SSH Config command implemented (REQ-007-006)
 - `internal/cmd/ssh_config.go` with `sd ssh-config <vm-name>` command
@@ -209,7 +220,11 @@ REQ-004-025: DNS filtering resolver not implemented.
   - Integration test: full host key lifecycle (capture -> verify -> change detect -> re-capture -> destroy)
   - Property tests: Capture round-trip (100 cases x 4 key types), same key always valid (100), different key always fails (100), no key always ErrNoHostKey for Read (100) and Verify (100), KnownHostsPath suffix invariant (100), RemoveSSHDir always succeeds (100), Remove then Read fails (100), Store+Read exact round-trip with 1-4 key types (100), hostKeysMatch symmetric (100), hostKeysMatch different material fails (100)
 
-Still needed: integration with `sd create` command to call CaptureHostKey after VM boot, and `sd connect` to call VerifyHostKey before SSH.
+Wired into create (CaptureHostKey), connect (VerifyHostKey), and destroy (RemoveSSHDir) in commit 65130d1.
+- `create.go`: captures host key after VM creation for TCP transport
+- `connect.go`: verifies host key before SSH for TCP transport, returns `ssh_host_key_changed` on mismatch
+- `destroy.go`: cleans up SSH directory on VM destruction
+- Tests in create_test.go, connect_test.go, destroy_test.go with digital twin overrides
 
 ### No CI workflow change detection
 REQ-004-018: Not implemented.
