@@ -149,7 +149,30 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
   - Digital twin: `mockProvisionBackend` recording Exec calls with configurable results/errors
   - `captureStdout` helper using `os.Pipe()` for stdout capture
 
-Still missing: token, security, diff, logs, completion.
+Still missing: token, security, diff, completion.
+
+### Logs command implemented (REQ-002-007)
+- `internal/cmd/logs.go` with `sd logs [name]` command
+- Without name: reads sd's own audit log from `~/.sd/audit.log`
+- With name: reads VM console log from `~/.lima/<name>/serial.log`
+- `--tail <n>` flag (default 50) shows last N lines
+- `--follow` / `-f` flag streams new log entries in real time (human mode only)
+- JSON output: `{"ok": true, "data": [{"line": ..., "content": ..., "source": ..., "vm": ...}]}` array
+- Human output: raw log lines; "No log entries found." for empty log
+- VM existence verified via backend.Status before reading VM logs
+- Error codes: `vm_not_found`, `backend_unavailable`, `logs_unavailable`, `invalid_argument`
+- Injectable `readLogFileFunc` and `tailFileFunc` for digital twin testing
+- Added "logs" to no-config-required list in root.go
+- Digital twin mock backend (`mockLogsBackend`) with configurable VM status map
+- Tests in `internal/cmd/logs_test.go` (31 tests):
+  - Unit tests: registration, max args, flags (--tail, --follow/-f), group ID
+  - Audit log tests: human output, JSON output, empty file, no file, no SDHome
+  - Tail tests: --tail works, tail larger than file, invalid tail (0, negative)
+  - VM log tests: human output, JSON output, VM not found, backend unavailable
+  - Follow tests: --follow flag, -f short flag, JSON mode outputs existing only, follow with tail
+  - Format tests: empty log human output
+  - Unit tests: makeLogEntries (empty, with content, with VM, line numbers)
+  - Property tests: JSON always valid (5 name variants), human contains content (5 strings), error codes snake_case (4 codes), VM not found never calls read log (3 names), JSON required fields (5 contents)
 
 ### Config command implemented (REQ-005-009 through REQ-005-013)
 - `internal/cmd/config.go` with `sd config` parent and 5 subcommands:
