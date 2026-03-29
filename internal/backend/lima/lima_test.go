@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"pgregory.net/rapid"
+
 	"sd/internal/backend"
 )
 
@@ -568,4 +570,303 @@ echo "Provisioning complete"
 	if !strings.Contains(yaml, "      #!/bin/bash") {
 		t.Error("script lines should be indented")
 	}
+}
+
+// --- Property-Based Tests for Lima YAML Generation ---
+//
+// These tests verify security-critical invariants of the Lima YAML generator
+// hold for ALL possible inputs, not just the examples we think of.
+
+// Property: isSensitiveKey always detects keys with sensitive suffixes.
+// REQ-003-023: Credential Isolation from Lima YAML
+func TestProperty_IsSensitiveKey_SensitiveSuffixes(t *testing.T) {
+	sensitiveSuffixes := []string{"_token", "_key", "_secret", "_password", "_credential"}
+	sensitiveExact := []string{"token", "key", "secret", "password", "credential"}
+
+	rapid.Check(t, func(t *rapid.T) {
+		suffix := rapid.SampledFrom(sensitiveSuffixes).Draw(t, "suffix")
+		prefix := rapid.StringMatching(`[A-Z_]{1,20}`).Draw(t, "prefix")
+		keyName := prefix + suffix
+
+		if !isSensitiveKey(keyName) {
+			t.Errorf("isSensitiveKey(%q) = false, want true (has sensitive suffix %q)", keyName, suffix)
+		}
+	})
+
+	rapid.Check(t, func(t *rapid.T) {
+		exact := rapid.SampledFrom(sensitiveExact).Draw(t, "exact")
+		// Case-insensitive match
+		if !isSensitiveKey(exact) {
+			t.Errorf("isSensitiveKey(%q) = false, want true (exact sensitive match)", exact)
+		}
+	})
+}
+
+// Property: isSensitiveKey always rejects common credential key names.
+// REQ-003-023
+func TestProperty_IsSensitiveKey_CommonCredentialKeys(t *testing.T) {
+	knownSensitive := []string{
+		"GITHUB_TOKEN", "ANTHROPIC_API_KEY", "SECRET_KEY",
+		"PRIVATE_KEY", "API_KEY", "ACCESS_KEY",
+		"CREDENTIAL", "PASSWORD", "SECRET",
+		"MY_TOKEN", "DB_PASSWORD", "SSH_KEY",
+		"SERVICE_CREDENTIAL", "AUTH_TOKEN",
+	}
+
+	rapid.Check(t, func(t *rapid.T) {
+		key := rapid.SampledFrom(knownSensitive).Draw(t, "key")
+		if !isSensitiveKey(key) {
+			t.Errorf("isSensitiveKey(%q) = false, want true", key)
+		}
+	})
+}
+
+// Property: Generated YAML ALWAYS has forwardAgent: false.
+// REQ-004-027: SSH Agent forwarding is always disabled.
+func TestProperty_YAMLAlwaysDisablesAgentForwarding(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := genRandomVMConfig(t)
+		yaml, err := generateYAML(t, cfg)
+		if err != nil {
+			t.Skipf("skipping due to expected error: %v", err)
+		}
+
+		if !strings.Contains(yaml, "forwardAgent: false") {
+			t.Errorf("YAML must always contain forwardAgent: false")
+		}
+		// Also verify no accidental "forwardAgent: true"
+		if strings.Contains(yaml, "forwardAgent: true") {
+			t.Errorf("YAML must never contain forwardAgent: true")
+		}
+	})
+}
+
+// Property: Generated YAML ALWAYS has empty mounts by default.
+// REQ-004-003: VMs have zero host mounts by default.
+func TestProperty_YAMLAlwaysHasEmptyMounts(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := genRandomVMConfig(t)
+		// Explicitly ensure no mounts (which is the default)
+		cfg.Mounts = nil
+		yaml, err := generateYAML(t, cfg)
+		if err != nil {
+			t.Skipf("skipping due to expected error: %v", err)
+		}
+
+		if !strings.Contains(yaml, "mounts: []") {
+			t.Errorf("YAML must always contain mounts: [] when no mounts specified")
+		}
+	})
+}
+
+// Property: Sensitive environment variable values NEVER appear in generated YAML.
+// REQ-003-023: Credential Isolation from Lima YAML.
+// This is the most critical property — if it fails, credentials leak to disk.
+func TestProperty_SensitiveEnvVarsNeverInYAML(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		sensitiveValue := rapid.StringMatching(`[A-Za-z0-9_-]{10,40}`).Draw(t, "sensitive_value")
+
+		cfg := backend.VMConfig{
+			CPUs:      4,
+			Memory:    "8GiB",
+			Disk:      "100GiB",
+			BaseImage: "ubuntu:24.04",
+			EnvVars: map[string]string{
+				"GITHUB_TOKEN":   sensitiveValue,
+				"API_KEY":        sensitiveValue,
+				"DB_PASSWORD":    sensitiveValue,
+				"SECRET_KEY":     sensitiveValue,
+				"MY_CREDENTIAL":  sensitiveValue,
+				"PRIVATE_KEY":    sensitiveValue,
+				"ACCESS_TOKEN":   sensitiveValue,
+				"PROJECT_NAME":   "myproject",
+			},
+		}
+
+		yaml, err := generateYAML(t, cfg)
+		if err != nil {
+			t.Skipf("skipping due to expected error: %v", err)
+		}
+
+		// The sensitive VALUE must never appear in YAML
+		if strings.Contains(yaml, sensitiveValue) {
+			t.Errorf("sensitive value %q leaked into Lima YAML:\n%s", sensitiveValue, yaml)
+		}
+
+		// Sensitive key names must not appear
+		sensitiveKeys := []string{"GITHUB_TOKEN", "API_KEY", "DB_PASSWORD", "SECRET_KEY", "MY_CREDENTIAL", "PRIVATE_KEY", "ACCESS_TOKEN"}
+		for _, key := range sensitiveKeys {
+			if strings.Contains(yaml, key+":") {
+				t.Errorf("sensitive key %q appears in Lima YAML", key)
+			}
+		}
+
+		// Non-sensitive key should appear
+		if !strings.Contains(yaml, "PROJECT_NAME:") {
+			t.Errorf("non-sensitive key PROJECT_NAME missing from YAML")
+		}
+	})
+}
+
+// Property: Non-sensitive environment variables are always preserved in YAML.
+// REQ-003-023: Only sensitive keys are filtered; legitimate env vars pass through.
+func TestProperty_NonSensitiveEnvVarsPreserved(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		name := rapid.StringMatching(`[A-Z][A-Z0-9_]{2,15}`).Draw(t, "name")
+		value := rapid.StringMatching(`[a-zA-Z0-9_-]{3,20}`).Draw(t, "value")
+
+		// Make sure the name isn't accidentally sensitive
+		if isSensitiveKey(name) {
+			t.Skip("randomly generated sensitive name")
+		}
+
+		cfg := backend.VMConfig{
+			CPUs:      4,
+			Memory:    "8GiB",
+			Disk:      "100GiB",
+			BaseImage: "ubuntu:24.04",
+			EnvVars:   map[string]string{name: value},
+		}
+
+		yaml, err := generateYAML(t, cfg)
+		if err != nil {
+			t.Skipf("skipping due to expected error: %v", err)
+		}
+
+		if !strings.Contains(yaml, name+":") {
+			t.Errorf("non-sensitive key %q missing from YAML", name)
+		}
+		if !strings.Contains(yaml, value) {
+			t.Errorf("non-sensitive value %q for key %q missing from YAML", value, name)
+		}
+	})
+}
+
+// Property: For any valid base image, generated YAML always contains an image URL.
+// REQ-003-024: Base Image Resolution
+func TestProperty_ValidBaseImageProducesURL(t *testing.T) {
+	knownImages := []string{"ubuntu:24.04", "ubuntu:22.04", "debian:12"}
+
+	rapid.Check(t, func(t *rapid.T) {
+		image := rapid.SampledFrom(knownImages).Draw(t, "image")
+
+		cfg := backend.VMConfig{
+			CPUs:      4,
+			Memory:    "8GiB",
+			Disk:      "100GiB",
+			BaseImage: image,
+		}
+
+		yaml, err := generateYAML(t, cfg)
+		if err != nil {
+			t.Fatalf("known image %q should not fail: %v", image, err)
+		}
+
+		if !strings.Contains(yaml, "images:") {
+			t.Errorf("YAML missing images: section")
+		}
+		if !strings.Contains(yaml, "location:") {
+			t.Errorf("YAML missing location: in images section")
+		}
+		if !strings.Contains(yaml, "http") {
+			t.Errorf("YAML missing URL in images section for image %q", image)
+		}
+	})
+}
+
+// Property: Generated YAML always contains required SSH section.
+// REQ-004-027: SSH forwarding disabled, no X11 forwarding.
+func TestProperty_YAMLAlwaysHasSSHSection(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := genRandomVMConfig(t)
+		yaml, err := generateYAML(t, cfg)
+		if err != nil {
+			t.Skipf("skipping due to expected error: %v", err)
+		}
+
+		if !strings.Contains(yaml, "ssh:") {
+			t.Errorf("YAML must always contain ssh: section")
+		}
+		if !strings.Contains(yaml, "forwardAgent: false") {
+			t.Errorf("YAML must always disable SSH agent forwarding")
+		}
+	})
+}
+
+// Property: Credential isolation is complete — for any mix of sensitive
+// and non-sensitive keys, only non-sensitive values appear in YAML.
+// REQ-003-023: This is the comprehensive version of the isolation test.
+func TestProperty_CredentialIsolationComplete(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		nVars := rapid.IntRange(1, 10).Draw(t, "n_vars")
+		envVars := make(map[string]string)
+
+		var nonSensitiveKeys []string
+
+		for i := 0; i < nVars; i++ {
+			isSensitive := rapid.Bool().Draw(t, "is_sensitive")
+			value := rapid.StringMatching(`[A-Za-z0-9]{8,20}`).Draw(t, "value")
+
+			var key string
+			if isSensitive {
+				suffix := rapid.SampledFrom([]string{"_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_CREDENTIAL"}).Draw(t, "suffix")
+				key = "VAR" + suffix
+			} else {
+				key = fmt.Sprintf("SAFE_VAR_%d", i)
+				nonSensitiveKeys = append(nonSensitiveKeys, key)
+			}
+			envVars[key] = value
+		}
+
+		cfg := backend.VMConfig{
+			CPUs:      4,
+			Memory:    "8GiB",
+			Disk:      "100GiB",
+			BaseImage: "ubuntu:24.04",
+			EnvVars:   envVars,
+		}
+
+		yaml, err := generateYAML(t, cfg)
+		if err != nil {
+			t.Skipf("skipping due to expected error: %v", err)
+		}
+
+		// Verify no sensitive key names appear
+		for key := range envVars {
+			if isSensitiveKey(key) {
+				if strings.Contains(yaml, key+":") {
+					t.Errorf("sensitive key %q leaked into YAML", key)
+				}
+			}
+		}
+
+		// Verify non-sensitive keys are preserved
+		for _, key := range nonSensitiveKeys {
+			if !strings.Contains(yaml, key+":") {
+				t.Errorf("non-sensitive key %q missing from YAML", key)
+			}
+		}
+	})
+}
+
+// --- Helpers for property-based tests ---
+
+func genRandomVMConfig(t *rapid.T) backend.VMConfig {
+	cpus := rapid.IntRange(1, 16).Draw(t, "cpus")
+	memory := rapid.SampledFrom([]string{"2GiB", "4GiB", "8GiB", "16GiB", "32GiB"}).Draw(t, "memory")
+	disk := rapid.SampledFrom([]string{"50GiB", "100GiB", "200GiB", "500GiB"}).Draw(t, "disk")
+	baseImage := rapid.SampledFrom([]string{"ubuntu:24.04", "ubuntu:22.04", "debian:12"}).Draw(t, "base_image")
+
+	return backend.VMConfig{
+		CPUs:      cpus,
+		Memory:    memory,
+		Disk:      disk,
+		BaseImage: baseImage,
+	}
+}
+
+func generateYAML(t *rapid.T, cfg backend.VMConfig) (string, error) {
+	t.Helper()
+	b := New()
+	return b.(*limaBackend).generateLimaYAML("testvm", cfg)
 }
