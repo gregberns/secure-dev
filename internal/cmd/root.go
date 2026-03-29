@@ -15,13 +15,9 @@ import (
 	"sd/internal/ui"
 )
 
+// rootCmd is initialized at declaration time so that other files' init()
+// functions can safely call rootCmd.AddCommand() regardless of file ordering.
 var (
-	rootCmd *cobra.Command
-	loader  *config.Loader
-	formatter *ui.Formatter
-)
-
-func init() {
 	rootCmd = &cobra.Command{
 		Use:   "sd",
 		Short: "Manage secure VM environments for AI coding agents",
@@ -60,7 +56,7 @@ credential injection, and session management.`,
 			// Commands that don't require config should still succeed
 			// when config file doesn't exist
 			requiresConfig := true
-			for _, name := range []string{"version", "help", "completion", "doctor"} {
+			for _, name := range []string{"version", "help", "completion", "doctor", "list"} {
 				if cmd.Name() == name {
 					requiresConfig = false
 					break
@@ -80,7 +76,11 @@ credential injection, and session management.`,
 			return nil
 		},
 	}
+	loader    *config.Loader
+	formatter *ui.Formatter
+)
 
+func init() {
 	// REQ-002-010: Global flags
 	rootCmd.PersistentFlags().Bool("json", false, "Output structured JSON to stdout")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "Enable verbose output")

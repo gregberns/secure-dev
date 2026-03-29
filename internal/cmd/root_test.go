@@ -16,12 +16,26 @@ import (
 )
 
 // newRootTestEnv sets up an isolated environment for root command tests.
+// Resets global flags so state doesn't leak between tests.
 func newRootTestEnv(t *testing.T) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("SD_HOME", tmpDir)
 	t.Setenv("HOME", tmpDir)
+	resetRootFlags(t)
 	return tmpDir
+}
+
+// resetRootFlags resets all global persistent flags to their defaults.
+// Required because rootCmd is a singleton and flag values persist across tests.
+func resetRootFlags(t *testing.T) {
+	t.Helper()
+	root := RootCmd()
+	_ = root.PersistentFlags().Set("json", "false")
+	_ = root.PersistentFlags().Set("verbose", "false")
+	_ = root.PersistentFlags().Set("quiet", "false")
+	_ = root.PersistentFlags().Set("config", "")
+	_ = root.PersistentFlags().Set("vm", "")
 }
 
 func TestRootCommand_HelpNoArgs(t *testing.T) {
