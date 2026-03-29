@@ -136,6 +136,111 @@ func TestVMConfig_EmptyRequiredFields(t *testing.T) {
 	}
 }
 
+// TestVMConfig_InvalidMemoryFormat fails validation.
+// REQ-003-011: Memory must be in <number><unit> format
+func TestVMConfig_InvalidMemoryFormat(t *testing.T) {
+	tests := []struct {
+		name   string
+		memory string
+	}{
+		{name: "plain number", memory: "8"},
+		{name: "wrong case", memory: "8gib"},
+		{name: "space in value", memory: "8 GiB"},
+		{name: "no number", memory: "GiB"},
+		{name: "negative", memory: "-4GiB"},
+		{name: "decimal", memory: "4.5GiB"},
+		{name: "random text", memory: "lots"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Memory = tt.memory
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("memory=%q should fail validation", tt.memory)
+			}
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("error does not wrap ErrInvalidConfig: %v", err)
+			}
+			if !strings.Contains(err.Error(), "memory") {
+				t.Errorf("error should mention memory: %v", err)
+			}
+		})
+	}
+}
+
+// TestVMConfig_InvalidDiskFormat fails validation.
+// REQ-003-011: Disk must be in <number><unit> format
+func TestVMConfig_InvalidDiskFormat(t *testing.T) {
+	tests := []struct {
+		name string
+		disk string
+	}{
+		{name: "plain number", disk: "100"},
+		{name: "wrong case", disk: "100gib"},
+		{name: "space in value", disk: "100 GiB"},
+		{name: "no number", disk: "GiB"},
+		{name: "random text", disk: "big"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Disk = tt.disk
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("disk=%q should fail validation", tt.disk)
+			}
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("error does not wrap ErrInvalidConfig: %v", err)
+			}
+			if !strings.Contains(err.Error(), "disk") {
+				t.Errorf("error should mention disk: %v", err)
+			}
+		})
+	}
+}
+
+// TestVMConfig_ValidResourceFormats pass validation.
+// REQ-003-011: Valid <number><unit> formats for Memory and Disk
+func TestVMConfig_ValidResourceFormats(t *testing.T) {
+	tests := []struct {
+		name string
+		fmt  string
+	}{
+		{name: "GiB", fmt: "8GiB"},
+		{name: "G", fmt: "8G"},
+		{name: "GB", fmt: "8GB"},
+		{name: "MiB", fmt: "512MiB"},
+		{name: "M", fmt: "512M"},
+		{name: "TiB", fmt: "1TiB"},
+		{name: "T", fmt: "1T"},
+		{name: "KiB", fmt: "1024KiB"},
+		{name: "K", fmt: "1024K"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test as Memory
+			cfg := validConfig()
+			cfg.Memory = tt.fmt
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("memory=%q should be valid: %v", tt.fmt, err)
+			}
+
+			// Test as Disk
+			cfg = validConfig()
+			cfg.Disk = tt.fmt
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("disk=%q should be valid: %v", tt.fmt, err)
+			}
+		})
+	}
+}
+
 // TestVMConfig_InvalidNetworkMode fails validation.
 // REQ-003-012: NetworkMode valid values
 func TestVMConfig_InvalidNetworkMode(t *testing.T) {

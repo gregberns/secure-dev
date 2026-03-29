@@ -2,6 +2,11 @@
 // REQ-003-011: VMConfig Struct
 package backend
 
+import (
+	"fmt"
+	"regexp"
+)
+
 // NetworkMode defines how a VM connects to the network.
 // REQ-003-012
 type NetworkMode string
@@ -90,6 +95,10 @@ type VMConfig struct {
 	BackendOptions map[string]any `json:"backend_options"`
 }
 
+// resourceSizePattern matches resource size strings like "4GiB", "100GiB", "8G", "512MiB".
+// REQ-003-011: Memory and Disk must use <number><unit> format.
+var resourceSizePattern = regexp.MustCompile(`^[0-9]+([KMGT]i?B?)$`)
+
 // Validate checks if the VMConfig is valid according to backend rules.
 // REQ-003-021: Error handling
 func (cfg *VMConfig) Validate() error {
@@ -99,8 +108,14 @@ func (cfg *VMConfig) Validate() error {
 	if cfg.Memory == "" {
 		return wrapError(ErrInvalidConfig, "memory cannot be empty")
 	}
+	if !resourceSizePattern.MatchString(cfg.Memory) {
+		return wrapError(ErrInvalidConfig, fmt.Sprintf("memory %q must be in <number><unit> format (e.g., 4GiB, 8G)", cfg.Memory))
+	}
 	if cfg.Disk == "" {
 		return wrapError(ErrInvalidConfig, "disk cannot be empty")
+	}
+	if !resourceSizePattern.MatchString(cfg.Disk) {
+		return wrapError(ErrInvalidConfig, fmt.Sprintf("disk %q must be in <number><unit> format (e.g., 50GiB, 100G)", cfg.Disk))
 	}
 	if cfg.BaseImage == "" {
 		return wrapError(ErrInvalidConfig, "base_image cannot be empty")

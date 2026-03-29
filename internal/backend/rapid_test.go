@@ -197,6 +197,101 @@ func TestProperty_EmptyMountPathsAlwaysFail(t *testing.T) {
 	})
 }
 
+// Property: Valid resource size formats always pass for Memory and Disk.
+func TestProperty_ValidResourceSizeFormatsAlwaysPass(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		size := rapid.SampledFrom([]string{
+			"1KiB", "512MiB", "4GiB", "8GiB", "16GiB", "100GiB", "1TiB",
+			"1K", "512M", "4G", "8G", "100G", "1T",
+			"1KB", "512MB", "4GB", "8GB", "100GB", "1TB",
+		}).Draw(t, "size")
+
+		cfg := VMConfig{
+			CPUs:      4,
+			Memory:    size,
+			Disk:      "100GiB",
+			BaseImage: "ubuntu:24.04",
+		}
+		assert.NoError(t, cfg.Validate(), "memory=%q should be valid", size)
+
+		cfg.Memory = "8GiB"
+		cfg.Disk = size
+		assert.NoError(t, cfg.Validate(), "disk=%q should be valid", size)
+	})
+}
+
+// Property: Invalid resource size formats always fail for Memory and Disk.
+func TestProperty_InvalidResourceSizeFormatsAlwaysFail(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		invalid := rapid.SampledFrom([]string{
+			"abc", "4gb", "8gib", "100", "-4GiB", "4 GiB",
+			"GiB", "4gib", "8g", "4.5GiB", "4 GiB ",
+			"4GiB ", " 4GiB", "4gIB", "4GIB", "4gib",
+		}).Draw(t, "invalid")
+
+		// Memory
+		cfg := VMConfig{
+			CPUs:      4,
+			Memory:    invalid,
+			Disk:      "100GiB",
+			BaseImage: "ubuntu:24.04",
+		}
+		err := cfg.Validate()
+		require.Error(t, err, "memory=%q should fail", invalid)
+		assert.True(t, errors.Is(err, ErrInvalidConfig))
+		assert.Contains(t, err.Error(), "memory")
+
+		// Disk
+		cfg.Memory = "8GiB"
+		cfg.Disk = invalid
+		err = cfg.Validate()
+		require.Error(t, err, "disk=%q should fail", invalid)
+		assert.True(t, errors.Is(err, ErrInvalidConfig))
+		assert.Contains(t, err.Error(), "disk")
+	})
+}
+
+// Property: Random valid resource sizes generated from components always pass.
+func TestProperty_RandomValidResourceSizesPass(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		amount := rapid.IntRange(1, 9999).Draw(t, "amount")
+		unit := rapid.SampledFrom([]string{
+			"K", "M", "G", "T",
+			"KiB", "MiB", "GiB", "TiB",
+			"KB", "MB", "GB", "TB",
+		}).Draw(t, "unit")
+		size := fmt.Sprintf("%d%s", amount, unit)
+
+		cfg := VMConfig{
+			CPUs:      4,
+			Memory:    size,
+			Disk:      size,
+			BaseImage: "ubuntu:24.04",
+		}
+		assert.NoError(t, cfg.Validate(), "size=%q should be valid", size)
+	})
+}
+
+// Property: Error message for bad format always includes the value and format hint.
+func TestProperty_ResourceSizeErrorIncludesValueAndHint(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		badValue := rapid.StringMatching(`[a-z]{2,10}`).Draw(t, "badValue")
+
+		cfg := VMConfig{
+			CPUs:      4,
+			Memory:    badValue,
+			Disk:      "100GiB",
+			BaseImage: "ubuntu:24.04",
+		}
+		err := cfg.Validate()
+		require.Error(t, err)
+		errMsg := err.Error()
+		assert.Contains(t, errMsg, badValue, "error should include the bad value")
+		assert.Contains(t, strings.ToLower(errMsg), "format",
+			"error should mention format")
+	})
+}
+
 // Property: Multiple valid mounts always pass.
 func TestProperty_MultipleValidMountsAlwaysPass(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
