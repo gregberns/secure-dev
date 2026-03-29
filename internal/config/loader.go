@@ -284,7 +284,7 @@ func (l *Loader) Source(key string) Source {
 // Warnings returns warnings collected during loading.
 func (l *Loader) Warnings() []string {
 	l.mu.RLock()
-	defer l.mu.RLock()
+	defer l.mu.RUnlock()
 	result := make([]string, len(l.warnings))
 	copy(result, l.warnings)
 	return result
