@@ -891,7 +891,8 @@ func TestProperty_ListBackendAlwaysLima(t *testing.T) {
 
 		n := rapid.IntRange(1, 5).Draw(t, "n")
 		for i := 0; i < n; i++ {
-			name := rapid.StringMatching(`vm-[a-z0-9]{3}`).Draw(t, "name")
+			suffix := rapid.StringMatching(`[a-z0-9]{3}`).Draw(t, "suffix")
+			name := fmt.Sprintf("vm-%d-%s", i, suffix)
 			require.NoError(t, b.Create(ctx, name, cfg))
 		}
 
