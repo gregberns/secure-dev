@@ -229,6 +229,69 @@ func TestValidateForRegistration_SelfDependency(t *testing.T) {
 	assert.Contains(t, err.Error(), "depends on itself")
 }
 
+// REQ-006-004: depends_on referencing a nonexistent module produces a validation error.
+func TestValidateForRegistration_UnknownDependency(t *testing.T) {
+	m := &Module{
+		Name:      "my-tool",
+		DependsOn: []string{"base", "nonexistent"},
+	}
+	err := m.ValidateForRegistration(map[string]bool{"base": true})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "depends on unknown module")
+	assert.Contains(t, err.Error(), "nonexistent")
+}
+
+// REQ-006-004: All known dependencies pass validation.
+func TestValidateForRegistration_KnownDependencies(t *testing.T) {
+	m := &Module{
+		Name:      "my-tool",
+		DependsOn: []string{"base", "golang"},
+	}
+	err := m.ValidateForRegistration(map[string]bool{"base": true, "golang": true})
+	assert.NoError(t, err)
+}
+
+// REQ-006-007: Duplicate module name produces a validation error.
+func TestValidateForRegistration_NameConflict(t *testing.T) {
+	m := &Module{
+		Name: "base",
+	}
+	err := m.ValidateForRegistration(map[string]bool{"base": true})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "already registered")
+}
+
+// REQ-006-004: Module with no dependencies and no name conflict passes.
+func TestValidateForRegistration_NoDepsNoConflict(t *testing.T) {
+	m := &Module{
+		Name: "new-mod",
+	}
+	err := m.ValidateForRegistration(map[string]bool{"base": true})
+	assert.NoError(t, err)
+}
+
+// REQ-006-004: All deps unknown when map is empty.
+func TestValidateForRegistration_AllDepsUnknown(t *testing.T) {
+	m := &Module{
+		Name:      "orphan",
+		DependsOn: []string{"base", "golang"},
+	}
+	err := m.ValidateForRegistration(map[string]bool{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "depends on unknown module")
+}
+
+// REQ-006-007: Self-dependency takes precedence over unknown dep.
+func TestValidateForRegistration_SelfDepBeforeUnknownDep(t *testing.T) {
+	m := &Module{
+		Name:      "a",
+		DependsOn: []string{"a", "ghost"},
+	}
+	err := m.ValidateForRegistration(map[string]bool{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "depends on itself")
+}
+
 // --- Property-Based Tests ---
 
 func TestProperty_ValidModuleAlwaysPassesValidation(t *testing.T) {

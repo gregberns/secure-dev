@@ -12,6 +12,7 @@ package provision
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -439,5 +440,173 @@ func TestProperty_ValidateDeterministic(t *testing.T) {
 			assert.Equal(t, err1.Error(), err2.Error(),
 				"Validate must be deterministic")
 		}
+	})
+}
+
+// ============================================================
+// ValidateForRegistration Dependency Validation (REQ-006-004)
+// ============================================================
+
+// Property: Any dependency on a module not in knownNames always fails.
+func TestProperty_UnknownDepAlwaysFailsRegistration(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		knownDep := rapid.StringMatching(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`).Draw(t, "known")
+		unknownDep := "z-missing-" + rapid.StringMatching(`[a-z0-9]{3}`).Draw(t, "unknown")
+		moduleName := "mod-" + rapid.StringMatching(`[a-z0-9]{3}`).Draw(t, "mod")
+
+		m := validModule()
+		m.Name = moduleName
+		m.DependsOn = []string{knownDep, unknownDep}
+
+		err := m.ValidateForRegistration(map[string]bool{knownDep: true})
+		require.Error(t, err, "unknown dep %q should fail registration", unknownDep)
+		assert.Contains(t, err.Error(), "depends on unknown module")
+		assert.Contains(t, err.Error(), unknownDep)
+	})
+}
+
+// Property: All dependencies known always passes the dependency check.
+func TestProperty_AllDepsKnownAlwaysPassesRegistration(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		nDeps := rapid.IntRange(1, 5).Draw(t, "nDeps")
+		knownNames := map[string]bool{"base": true}
+		var deps []string
+		for i := 0; i < nDeps; i++ {
+			dep := fmt.Sprintf("dep%d", i)
+			knownNames[dep] = true
+			deps = append(deps, dep)
+		}
+
+		moduleName := "mod-" + rapid.StringMatching(`[a-z0-9]{3}`).Draw(t, "mod")
+		m := validModule()
+		m.Name = moduleName
+		m.DependsOn = deps
+
+		err := m.ValidateForRegistration(knownNames)
+		assert.NoError(t, err, "all deps known should pass registration")
+	})
+}
+
+// Property: A single unknown dependency among many known ones always fails.
+func TestProperty_OneUnknownAmongManyAlwaysFails(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		nKnown := rapid.IntRange(2, 6).Draw(t, "nKnown")
+		knownNames := map[string]bool{}
+		var deps []string
+		for i := 0; i < nKnown; i++ {
+			dep := fmt.Sprintf("k%d", i)
+			knownNames[dep] = true
+			deps = append(deps, dep)
+		}
+
+		unknown := "z-unknown-" + rapid.StringMatching(`[a-z0-9]{3}`).Draw(t, "unk")
+		pos := rapid.IntRange(0, len(deps)).Draw(t, "pos")
+		deps = append(deps[:pos], append([]string{unknown}, deps[pos:]...)...)
+
+		moduleName := "mod-" + rapid.StringMatching(`[a-z0-9]{3}`).Draw(t, "mod")
+		m := validModule()
+		m.Name = moduleName
+		m.DependsOn = deps
+
+		err := m.ValidateForRegistration(knownNames)
+		require.Error(t, err, "unknown dep among known should fail")
+		assert.Contains(t, err.Error(), "depends on unknown module")
+	})
+}
+
+// Property: Empty known names map causes any module with deps to fail.
+func TestProperty_EmptyKnownNamesRejectsAllDeps(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		dep := rapid.StringMatching(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`).Draw(t, "dep")
+		moduleName := "mod-" + rapid.StringMatching(`[a-z0-9]{3}`).Draw(t, "mod")
+
+		m := validModule()
+		m.Name = moduleName
+		m.DependsOn = []string{dep}
+
+		err := m.ValidateForRegistration(map[string]bool{})
+		require.Error(t, err, "dep %q should fail with empty known names", dep)
+		assert.Contains(t, err.Error(), "depends on unknown module")
+	})
+}
+
+// Property: Registering a module whose name is already in knownNames always fails.
+func TestProperty_DuplicateNameAlwaysFailsRegistration(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		name := rapid.StringMatching(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`).Draw(t, "name")
+
+		m := validModule()
+		m.Name = name
+
+		err := m.ValidateForRegistration(map[string]bool{name: true})
+		require.Error(t, err, "duplicate name %q should fail", name)
+		assert.Contains(t, err.Error(), "already registered")
+	})
+}
+
+// Property: A module whose name is NOT in knownNames always passes the name check.
+func TestProperty_UniqueNameAlwaysPassesNameCheck(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		moduleName := "mod-" + rapid.StringMatching(`[a-z0-9]{4}`).Draw(t, "mod")
+		existingName := "existing-" + rapid.StringMatching(`[a-z0-9]{4}`).Draw(t, "existing")
+
+		m := validModule()
+		m.Name = moduleName
+		m.DependsOn = nil
+
+		err := m.ValidateForRegistration(map[string]bool{existingName: true})
+		assert.NoError(t, err, "unique name should pass")
+	})
+}
+
+// Property: Registration error always contains the module name.
+func TestProperty_RegistrationErrorContainsModuleName(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		name := rapid.StringMatching(`^[a-z][a-z0-9-]{2,10}`).Draw(t, "name")
+
+		m := validModule()
+		m.Name = name
+		m.DependsOn = []string{name} // self-dep
+
+		err := m.ValidateForRegistration(map[string]bool{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), name, "error should mention module name")
+	})
+}
+
+// Property: Registration check is deterministic.
+func TestProperty_RegistrationDeterministic(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		name := rapid.StringMatching(`^[a-z]{2,8}`).Draw(t, "name")
+		m := validModule()
+		m.Name = name
+		m.DependsOn = []string{"ghost"}
+
+		err1 := m.ValidateForRegistration(map[string]bool{})
+		err2 := m.ValidateForRegistration(map[string]bool{})
+		assert.Equal(t, err1 == nil, err2 == nil, "registration check must be deterministic")
+		if err1 != nil && err2 != nil {
+			assert.Equal(t, err1.Error(), err2.Error())
+		}
+	})
+}
+
+// Property: Registration check is independent of dependency order.
+func TestProperty_RegistrationOrderIndependent(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		m1 := validModule()
+		m1.Name = "test-mod"
+		m1.DependsOn = []string{"alpha", "beta", "gamma"}
+
+		m2 := validModule()
+		m2.Name = "test-mod"
+		m2.DependsOn = []string{"gamma", "alpha", "beta"}
+
+		known := map[string]bool{"alpha": true, "beta": true, "gamma": true}
+
+		err1 := m1.ValidateForRegistration(known)
+		err2 := m2.ValidateForRegistration(known)
+		assert.Equal(t, err1 == nil, err2 == nil,
+			"registration should be independent of dep order")
 	})
 }

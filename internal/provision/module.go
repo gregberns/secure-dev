@@ -148,6 +148,21 @@ func (m *Module) ValidateForRegistration(knownNames map[string]bool) error {
 			return fmt.Errorf("module %q depends on itself", m.Name)
 		}
 	}
+
+	// Check that all dependencies reference known modules.
+	// REQ-006-004: depends_on referencing a nonexistent module produces a validation error.
+	for _, dep := range m.DependsOn {
+		if !knownNames[dep] {
+			return fmt.Errorf("module %q depends on unknown module %q", m.Name, dep)
+		}
+	}
+
+	// Check for name conflicts with already-registered modules.
+	// REQ-006-007: Custom module names MUST NOT conflict with built-in names.
+	if knownNames[m.Name] {
+		return fmt.Errorf("module %q is already registered", m.Name)
+	}
+
 	return nil
 }
 
