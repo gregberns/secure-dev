@@ -1134,3 +1134,419 @@ func TestTimestamps_StoppedAtSetOnStop(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, GetVMs()["ts"].StoppedAt)
 }
+
+// ============================================================
+// State Machine Property-Based Tests
+// ============================================================
+//
+// These tests model mocklimactl as a simplified state machine and verify
+// that after any sequence of operations, the mock's actual state matches
+// the model's expected state. This catches state corruption bugs that
+// individual operation tests miss.
+//
+// Model: tracks VM names -> status ("stopped"|"running") and
+// per-VM snapshot tags -> snapshotted status.
+
+// vmOperation represents a single operation in the state machine.
+type vmOperation struct {
+	Op  string
+	VM  string
+	Tag string
+}
+
+// vmModel tracks expected VM and snapshot states.
+type vmModel struct {
+	vms       map[string]string            // name -> "stopped"|"running"
+	snapshots map[string]map[string]string // vmName -> tag -> snapshottedStatus
+}
+
+func newVMModel() *vmModel {
+	return &vmModel{
+		vms:       make(map[string]string),
+		snapshots: make(map[string]map[string]string),
+	}
+}
+
+// apply transitions the model and returns whether the operation should succeed.
+func (m *vmModel) apply(op vmOperation) bool {
+	switch op.Op {
+	case "create":
+		if _, exists := m.vms[op.VM]; exists {
+			return false
+		}
+		m.vms[op.VM] = "stopped"
+		m.snapshots[op.VM] = make(map[string]string)
+		return true
+	case "start":
+		status, exists := m.vms[op.VM]
+		if !exists {
+			return false
+		}
+		if status != "running" {
+			m.vms[op.VM] = "running"
+		}
+		return true
+	case "stop":
+		status, exists := m.vms[op.VM]
+		if !exists {
+			return false
+		}
+		if status != "stopped" {
+			m.vms[op.VM] = "stopped"
+		}
+		return true
+	case "delete":
+		status, exists := m.vms[op.VM]
+		if !exists {
+			return false
+		}
+		if status == "running" {
+			return false
+		}
+		delete(m.vms, op.VM)
+		delete(m.snapshots, op.VM)
+		return true
+	case "snap_create":
+		if _, exists := m.vms[op.VM]; !exists {
+			return false
+		}
+		if _, exists := m.snapshots[op.VM][op.Tag]; exists {
+			return false
+		}
+		m.snapshots[op.VM][op.Tag] = m.vms[op.VM]
+		return true
+	case "snap_restore":
+		if _, exists := m.vms[op.VM]; !exists {
+			return false
+		}
+		snapStatus, exists := m.snapshots[op.VM][op.Tag]
+		if !exists {
+			return false
+		}
+		m.vms[op.VM] = snapStatus
+		return true
+	case "snap_delete":
+		if _, exists := m.vms[op.VM]; !exists {
+			return false
+		}
+		if _, exists := m.snapshots[op.VM][op.Tag]; !exists {
+			return false
+		}
+		delete(m.snapshots[op.VM], op.Tag)
+		return true
+	}
+	return false
+}
+
+// verify checks that the mock's actual state matches the model.
+// Accepts any type satisfying testify's TestingT (assert/require use Errorf internally).
+func (m *vmModel) verify(t interface {
+	Errorf(format string, args ...interface{})
+}) {
+	actual := GetVMs()
+
+	assert.Equal(t, len(m.vms), len(actual),
+		"model expects %d VMs, actual has %d", len(m.vms), len(actual))
+
+	for name, expectedStatus := range m.vms {
+		vm, exists := actual[name]
+		assert.True(t, exists, "model expects VM %q to exist", name)
+		if !exists {
+			continue
+		}
+		assert.Equal(t, expectedStatus, vm.Status,
+			"VM %q: expected status %q, got %q", name, expectedStatus, vm.Status)
+
+		expectedSnapCount := len(m.snapshots[name])
+		assert.Equal(t, expectedSnapCount, len(vm.Snapshots),
+			"VM %q: expected %d snapshots, got %d", name, expectedSnapCount, len(vm.Snapshots))
+
+		for tag, expectedSnapStatus := range m.snapshots[name] {
+			found := false
+			for _, snap := range vm.Snapshots {
+				if snap.Name == tag {
+					found = true
+					assert.Equal(t, expectedSnapStatus, snap.VMState.Status,
+						"VM %q snap %q: expected snapshotted status %q, got %q",
+						name, tag, expectedSnapStatus, snap.VMState.Status)
+					assert.NotZero(t, snap.CreatedAt,
+						"VM %q snap %q: CreatedAt must be set", name, tag)
+					assert.Greater(t, snap.Size, int64(0),
+						"VM %q snap %q: Size must be positive", name, tag)
+					break
+				}
+			}
+			assert.True(t, found, "VM %q: expected snapshot %q", name, tag)
+		}
+	}
+
+	for name := range actual {
+		_, exists := m.vms[name]
+		assert.True(t, exists, "actual has VM %q not in model", name)
+	}
+}
+
+// TestProperty_StateMachine_ArbitrarySequence generates random sequences of
+// VM lifecycle and snapshot operations across multiple VMs, verifying the
+// mock's actual state always matches a simplified model after every operation.
+func TestProperty_StateMachine_ArbitrarySequence(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		Reset()
+		defer Reset()
+
+		model := newVMModel()
+
+		vmNames := rapid.SliceOfNDistinct(
+			rapid.StringMatching(`sm-[a-z0-9]{2,5}`),
+			1, 4,
+			func(s string) string { return s },
+		).Draw(t, "vmNames")
+
+		snapTags := rapid.SliceOfNDistinct(
+			rapid.StringMatching(`st-[a-z0-9]{2,4}`),
+			1, 3,
+			func(s string) string { return s },
+		).Draw(t, "snapTags")
+
+		allOps := []string{
+			"create", "start", "stop", "delete",
+			"snap_create", "snap_restore", "snap_delete",
+		}
+		nOps := rapid.IntRange(10, 50).Draw(t, "nOps")
+
+		for i := 0; i < nOps; i++ {
+			op := vmOperation{
+				Op:  rapid.SampledFrom(allOps).Draw(t, "op"),
+				VM:  rapid.SampledFrom(vmNames).Draw(t, "vm"),
+				Tag: rapid.SampledFrom(snapTags).Draw(t, "tag"),
+			}
+
+			shouldSucceed := model.apply(op)
+
+			var err error
+			switch op.Op {
+			case "create":
+				_, err = MockRun([]string{"create", op.VM})
+			case "start":
+				_, err = MockRun([]string{"start", op.VM})
+			case "stop":
+				_, err = MockRun([]string{"stop", op.VM})
+			case "delete":
+				_, err = MockRun([]string{"delete", op.VM})
+			case "snap_create":
+				_, err = MockRun([]string{"snapshot", "create", op.VM, op.Tag})
+			case "snap_restore":
+				_, err = MockRun([]string{"snapshot", "restore", op.VM, op.Tag})
+			case "snap_delete":
+				_, err = MockRun([]string{"snapshot", "delete", op.VM, op.Tag})
+			}
+
+			if shouldSucceed {
+				assert.NoError(t, err,
+					"step %d: %s(%s,%s) should succeed", i, op.Op, op.VM, op.Tag)
+			} else {
+				assert.Error(t, err,
+					"step %d: %s(%s,%s) should fail", i, op.Op, op.VM, op.Tag)
+			}
+
+			// Verify model matches actual after every operation
+			model.verify(t)
+		}
+	})
+}
+
+// TestProperty_StateMachine_ListMatchesModel verifies that list output
+// always contains exactly the VMs tracked by the model with correct statuses.
+func TestProperty_StateMachine_ListMatchesModel(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		Reset()
+		defer Reset()
+
+		model := newVMModel()
+
+		vmNames := rapid.SliceOfNDistinct(
+			rapid.StringMatching(`lm-[a-z0-9]{2,5}`),
+			1, 3,
+			func(s string) string { return s },
+		).Draw(t, "vmNames")
+
+		// Create all VMs first
+		for _, name := range vmNames {
+			_, err := MockRun([]string{"create", name})
+			require.NoError(t, err)
+			model.vms[name] = "stopped"
+			model.snapshots[name] = make(map[string]string)
+		}
+
+		// Apply random start/stop operations
+		nOps := rapid.IntRange(5, 20).Draw(t, "nOps")
+		for i := 0; i < nOps; i++ {
+			op := vmOperation{
+				Op: rapid.SampledFrom([]string{"start", "stop"}).Draw(t, "op"),
+				VM: rapid.SampledFrom(vmNames).Draw(t, "vm"),
+			}
+			model.apply(op)
+			switch op.Op {
+			case "start":
+				MockRun([]string{"start", op.VM})
+			case "stop":
+				MockRun([]string{"stop", op.VM})
+			}
+		}
+
+		// Verify list output matches model
+		out, err := MockRun([]string{"list"})
+		require.NoError(t, err)
+
+		if len(model.vms) == 0 {
+			assert.Equal(t, "", out)
+		} else {
+			lines := strings.Split(out, "\n")
+			assert.Equal(t, len(model.vms), len(lines),
+				"list should have one line per VM")
+
+			for name, expectedStatus := range model.vms {
+				found := false
+				for _, line := range lines {
+					fields := strings.Split(line, "\t")
+					if len(fields) >= 2 && fields[0] == name {
+						found = true
+						assert.Equal(t, expectedStatus, fields[1],
+							"list: VM %q status should be %q", name, expectedStatus)
+						break
+					}
+				}
+				assert.True(t, found, "list should contain VM %q", name)
+			}
+		}
+	})
+}
+
+// TestProperty_StateMachine_StatusJSONMatchesModel verifies status output
+// always returns valid JSON matching the model after random operations.
+func TestProperty_StateMachine_StatusJSONMatchesModel(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		Reset()
+		defer Reset()
+
+		name := rapid.StringMatching(`sj-[a-z0-9]{2,5}`).Draw(t, "name")
+
+		_, err := MockRun([]string{"create", name})
+		require.NoError(t, err)
+
+		// Apply random operations tracking expected status
+		expectedStatus := "stopped"
+		nOps := rapid.IntRange(1, 10).Draw(t, "nOps")
+		for i := 0; i < nOps; i++ {
+			op := rapid.SampledFrom([]string{"start", "stop"}).Draw(t, "op")
+			switch op {
+			case "start":
+				MockRun([]string{"start", name})
+				expectedStatus = "running"
+			case "stop":
+				MockRun([]string{"stop", name})
+				expectedStatus = "stopped"
+			}
+		}
+
+		// Verify status output
+		out, err := MockRun([]string{"status", name})
+		require.NoError(t, err)
+
+		var vm VMState
+		require.NoError(t, json.Unmarshal([]byte(out), &vm))
+		assert.Equal(t, name, vm.Name)
+		assert.Equal(t, expectedStatus, vm.Status)
+	})
+}
+
+// TestProperty_StateMachine_DeleteAndRecreateNoStaleState verifies that
+// deleting a VM and recreating it with the same name produces a clean slate
+// with no inherited snapshots or stale state.
+func TestProperty_StateMachine_DeleteAndRecreateNoStaleState(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		Reset()
+		defer Reset()
+
+		name := rapid.StringMatching(`rc-[a-z0-9]{2,5}`).Draw(t, "name")
+		tag := rapid.StringMatching(`rc-t-[a-z0-9]{2}`).Draw(t, "tag")
+
+		// Create, start, snapshot
+		_, err := MockRun([]string{"create", name})
+		require.NoError(t, err)
+		_, err = MockRun([]string{"start", name})
+		require.NoError(t, err)
+		_, err = MockRun([]string{"snapshot", "create", name, tag})
+		require.NoError(t, err)
+
+		// Verify snapshot exists
+		vms := GetVMs()
+		assert.Len(t, vms[name].Snapshots, 1)
+
+		// Stop and delete
+		_, err = MockRun([]string{"stop", name})
+		require.NoError(t, err)
+		_, err = MockRun([]string{"delete", name})
+		require.NoError(t, err)
+
+		// Recreate with same name
+		_, err = MockRun([]string{"create", name})
+		require.NoError(t, err)
+
+		// New VM must be clean — no stale snapshots
+		vms = GetVMs()
+		assert.Equal(t, "stopped", vms[name].Status)
+		assert.Empty(t, vms[name].Snapshots,
+			"recreated VM must not inherit old snapshots")
+		assert.False(t, vms[name].CreatedAt.IsZero(),
+			"CreatedAt must be set for recreated VM")
+	})
+}
+
+// TestProperty_StateMachine_SnapshotRestorePreservesOtherSnapshots verifies
+// that restoring one snapshot does not affect other existing snapshots.
+func TestProperty_StateMachine_SnapshotRestorePreservesOtherSnapshots(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		Reset()
+		defer Reset()
+
+		name := rapid.StringMatching(`sp-[a-z0-9]{2,5}`).Draw(t, "name")
+		tag1 := rapid.StringMatching(`sp-a-[a-z0-9]{2}`).Draw(t, "tag1")
+		tag2 := rapid.StringMatching(`sp-b-[a-z0-9]{2}`).Draw(t, "tag2")
+
+		// Create VM, start, snapshot while running
+		_, err := MockRun([]string{"create", name})
+		require.NoError(t, err)
+		_, err = MockRun([]string{"start", name})
+		require.NoError(t, err)
+		_, err = MockRun([]string{"snapshot", "create", name, tag1})
+		require.NoError(t, err)
+
+		// Stop, snapshot while stopped
+		_, err = MockRun([]string{"stop", name})
+		require.NoError(t, err)
+		_, err = MockRun([]string{"snapshot", "create", name, tag2})
+		require.NoError(t, err)
+
+		// Both snapshots should exist
+		vms := GetVMs()
+		assert.Len(t, vms[name].Snapshots, 2)
+
+		// Restore tag1 (running snapshot) — should not delete tag2
+		_, err = MockRun([]string{"snapshot", "restore", name, tag1})
+		require.NoError(t, err)
+
+		vms = GetVMs()
+		assert.Equal(t, "running", vms[name].Status,
+			"restoring running snapshot should restore to running")
+		assert.Len(t, vms[name].Snapshots, 2,
+			"restoring one snapshot must not remove other snapshots")
+
+		snapNames := make(map[string]bool)
+		for _, s := range vms[name].Snapshots {
+			snapNames[s.Name] = true
+		}
+		assert.True(t, snapNames[tag1])
+		assert.True(t, snapNames[tag2])
+	})
+}

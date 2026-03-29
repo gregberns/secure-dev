@@ -448,18 +448,19 @@ func TestProperty_ListReflectsExactState(t *testing.T) {
 			BaseImage: "ubuntu:24.04",
 		}
 
-		// Create a random number of VMs
-		n := rapid.IntRange(1, 5).Draw(t, "num_vms")
-		var created []string
-		for i := 0; i < n; i++ {
-			name := rapid.StringMatching(`vm-[a-z0-9]{3}`).Draw(t, "name")
-			created = append(created, name)
+		// Create a random number of distinct VMs
+		created := rapid.SliceOfNDistinct(
+			rapid.StringMatching(`vm-[a-z0-9]{3}`),
+			1, 5,
+			func(s string) string { return s },
+		).Draw(t, "vm_names")
+		for _, name := range created {
 			require.NoError(t, b.Create(ctx, name, cfg))
 		}
 
 		vms, err := b.List(ctx)
 		require.NoError(t, err)
-		assert.Len(t, vms, n, "list must contain exactly %d VMs", n)
+		assert.Len(t, vms, len(created), "list must contain exactly %d VMs", len(created))
 
 		listNames := make(map[string]bool)
 		for _, vm := range vms {
@@ -590,11 +591,12 @@ func TestProperty_StatusListConsistency(t *testing.T) {
 			BaseImage: "ubuntu:24.04",
 		}
 
-		n := rapid.IntRange(1, 4).Draw(t, "num_vms")
-		var names []string
-		for i := 0; i < n; i++ {
-			name := rapid.StringMatching(`vm-[a-z0-9]{3}`).Draw(t, "name")
-			names = append(names, name)
+		names := rapid.SliceOfNDistinct(
+			rapid.StringMatching(`vm-[a-z0-9]{3}`),
+			1, 4,
+			func(s string) string { return s },
+		).Draw(t, "vm_names")
+		for _, name := range names {
 			require.NoError(t, b.Create(ctx, name, cfg))
 		}
 
