@@ -149,7 +149,33 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
   - Digital twin: `mockProvisionBackend` recording Exec calls with configurable results/errors
   - `captureStdout` helper using `os.Pipe()` for stdout capture
 
-Still missing: token, security, diff, completion.
+Still missing: security status, diff, config egress.
+
+### Token command implemented (REQ-002-008, REQ-004-012, REQ-004-015)
+- `internal/cmd/token.go` with `sd token` parent command and 4 subcommands:
+  - `sd token github setup` -- show guidance for creating a fine-grained GitHub PAT (REQ-004-012)
+  - `sd token rotate <vm>` -- rotate credentials for a VM from host environment variables (REQ-004-015)
+  - `sd token revoke <vm>` -- revoke all stored credentials for a VM (REQ-004-015)
+  - `sd token list <vm>` -- list configured credential types without revealing values (REQ-004-015)
+- `sd token github setup` human output: step-by-step instructions with recommended scopes
+- `sd token github setup --json`: outputs `{"ok": true, "data": {"pat_type": "fine-grained", "setup_url": ..., "recommended_scopes": [...], "notes": [...]}}`
+- `sd token rotate <vm>` reads GITHUB_TOKEN and ANTHROPIC_API_KEY from host environment
+- Validates tokens using security.ValidateToken (warns on classic PAT, unusual key formats)
+- Stores credentials in VM config file at `$SD_HOME/vms/<name>/config.yaml` under `env` key
+- Preserves non-credential env vars during rotate and revoke
+- Error codes: `token_rotate_failed`, `token_revoke_failed`, `token_not_configured`, `invalid_argument`, `config_not_found`
+- Injectable `readVMEnvFunc` and `writeVMEnvFunc` for digital twin testing
+- Added "token" to no-config-required list in root.go
+- Tests in `internal/cmd/token_test.go` (38 tests):
+  - Registration: command registered, subcommands exist (github/rotate/revoke/list), github setup registered, no-config required
+  - GitHub setup: human output, JSON output, rejects extra args
+  - Rotate: human output, JSON output, no credentials error, classic PAT warning, only Anthropic key, preserves existing env, read error, write error, missing VM, empty VM
+  - Revoke: human output, JSON output, no credentials, preserves other env, missing VM, empty VM, read error
+  - List: human output, JSON output, none configured, all configured, missing VM, empty VM, read error
+  - Format helpers: formatCredentialList (normal, empty, all configured), formatGithubSetupGuidance
+  - Lifecycle: full rotate -> list -> revoke -> list cycle
+  - Property tests: rotate JSON always valid (5 cases), error codes snake_case (4 cases), list JSON required fields, setup JSON required fields, never shows values (2 modes), rotate stores in VM config
+  - Validation integration: key format validation
 
 ### Logs command implemented (REQ-002-007)
 - `internal/cmd/logs.go` with `sd logs [name]` command
