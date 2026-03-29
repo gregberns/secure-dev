@@ -11,6 +11,8 @@ package lima
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -101,8 +103,55 @@ func TestParseStatus_JSONFallbackOrder(t *testing.T) {
 	assert.Equal(t, backend.StatusRunning, got)
 }
 
-// REQ-003-005: parseListOutput handles tab-separated format.
-func TestParseListOutput_Valid(t *testing.T) {
+// REQ-003-005: parseListOutput handles JSON format (primary path).
+func TestParseListOutput_JSON(t *testing.T) {
+	input := `[{"name":"vm1","status":"Running","cpus":4,"memory":"8GiB","disk":"100GiB","dir":"~/.lima/vm1"},
+{"name":"vm2","status":"Stopped","cpus":2,"memory":"4GiB","disk":"50GiB","dir":"~/.lima/vm2"}]`
+	vms, err := parseListOutput(input)
+	require.NoError(t, err)
+	require.Len(t, vms, 2)
+
+	assert.Equal(t, "vm1", vms[0].Name)
+	assert.Equal(t, backend.StatusRunning, vms[0].Status)
+	assert.Equal(t, 4, vms[0].CPUs)
+	assert.Equal(t, "8GiB", vms[0].Memory)
+	assert.Equal(t, "100GiB", vms[0].Disk)
+	assert.Equal(t, "lima", vms[0].Backend)
+
+	assert.Equal(t, "vm2", vms[1].Name)
+	assert.Equal(t, backend.StatusStopped, vms[1].Status)
+	assert.Equal(t, 2, vms[1].CPUs)
+}
+
+func TestParseListOutput_EmptyJSON(t *testing.T) {
+	vms, err := parseListOutput("[]")
+	require.NoError(t, err)
+	assert.Empty(t, vms)
+}
+
+// REQ-003-005: parseListOutput handles real limactl text format with header.
+func TestParseListOutput_RealLimactlFormat(t *testing.T) {
+	// Real limactl list output: 9 tab-separated fields with header
+	input := "NAME\tSTATUS\tSSH\tVMTYPE\tARCH\tCPUS\tMEMORY\tDISK\tDIR\n" +
+		"vm1\tRunning\t127.0.0.1:52215\tvz\taarch64\t4\t8GiB\t100GiB\t~/.lima/vm1\n" +
+		"vm2\tStopped\t\tqemu\tx86_64\t2\t4GiB\t50GiB\t~/.lima/vm2"
+	vms, err := parseListOutput(input)
+	require.NoError(t, err)
+	require.Len(t, vms, 2)
+
+	assert.Equal(t, "vm1", vms[0].Name)
+	assert.Equal(t, backend.StatusRunning, vms[0].Status)
+	assert.Equal(t, 4, vms[0].CPUs)
+	assert.Equal(t, "8GiB", vms[0].Memory)
+	assert.Equal(t, "100GiB", vms[0].Disk)
+
+	assert.Equal(t, "vm2", vms[1].Name)
+	assert.Equal(t, backend.StatusStopped, vms[1].Status)
+	assert.Equal(t, 2, vms[1].CPUs)
+}
+
+// REQ-003-005: parseListOutput handles compact 6-field format (legacy/mock).
+func TestParseListOutput_CompactFormat(t *testing.T) {
 	input := "vm1\trunning\tubuntu:24.04\t4\t8GiB\t100GiB\nvm2\tstopped\tdebian:12\t2\t4GiB\t50GiB"
 	vms, err := parseListOutput(input)
 	require.NoError(t, err)
@@ -118,6 +167,14 @@ func TestParseListOutput_Valid(t *testing.T) {
 	assert.Equal(t, "vm2", vms[1].Name)
 	assert.Equal(t, backend.StatusStopped, vms[1].Status)
 	assert.Equal(t, 2, vms[1].CPUs)
+}
+
+// REQ-003-005: header line alone produces empty result.
+func TestParseListOutput_HeaderOnly(t *testing.T) {
+	input := "NAME\tSTATUS\tSSH\tVMTYPE\tARCH\tCPUS\tMEMORY\tDISK\tDIR"
+	vms, err := parseListOutput(input)
+	require.NoError(t, err)
+	assert.Empty(t, vms)
 }
 
 func TestParseListOutput_Empty(t *testing.T) {
@@ -175,8 +232,11 @@ func TestProperty_ParseListOutputAlwaysValid(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		output := rapid.OneOf(
 			rapid.Just(""),
+			rapid.Just("[]"),
+			rapid.Just(`[{"name":"vm1","status":"Running","cpus":4,"memory":"8GiB","disk":"100GiB"}]`),
 			rapid.Just("vm1\trunning\tubuntu:24.04\t4\t8GiB\t100GiB"),
-			rapid.StringMatching(`[a-zA-Z0-9 \t.:]{0,200}`),
+			rapid.Just("NAME\tSTATUS\tSSH\tVMTYPE\tARCH\tCPUS\tMEMORY\tDISK\tDIR\nvm1\tRunning\t127.0.0.1\tvz\taarch64\t4\t8GiB\t100GiB\t~/.lima/vm1"),
+			rapid.StringMatching(`[a-zA-Z0-9 \t.:{},"\[\]]{0,300}`),
 		).Draw(t, "output")
 
 		vms, err := parseListOutput(output)
@@ -185,6 +245,62 @@ func TestProperty_ParseListOutputAlwaysValid(t *testing.T) {
 		for _, vm := range vms {
 			assert.Equal(t, "lima", vm.Backend)
 			assert.NotEmpty(t, vm.Name)
+		}
+	})
+}
+
+// Property: parseListOutput JSON roundtrip preserves VM names and field counts.
+func TestProperty_ParseListOutputJSONRoundtrip(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		n := rapid.IntRange(0, 5).Draw(t, "n_vms")
+		type entry struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			CPUs   int    `json:"cpus"`
+			Memory string `json:"memory"`
+			Disk   string `json:"disk"`
+		}
+		entries := make([]entry, n)
+		names := make(map[string]bool)
+		for i := range entries {
+			name := rapid.StringMatching(`vm-[a-z0-9]{3,8}`).Draw(t, fmt.Sprintf("name_%d", i))
+			status := rapid.SampledFrom([]string{"Running", "Stopped", "Creating", "Error"}).Draw(t, fmt.Sprintf("status_%d", i))
+			cpus := rapid.IntRange(1, 16).Draw(t, fmt.Sprintf("cpus_%d", i))
+			mem := rapid.SampledFrom([]string{"2GiB", "4GiB", "8GiB", "16GiB"}).Draw(t, fmt.Sprintf("mem_%d", i))
+			disk := rapid.SampledFrom([]string{"50GiB", "100GiB", "200GiB"}).Draw(t, fmt.Sprintf("disk_%d", i))
+			entries[i] = entry{Name: name, Status: status, CPUs: cpus, Memory: mem, Disk: disk}
+			names[name] = true
+		}
+		data, err := json.Marshal(entries)
+		require.NoError(t, err)
+
+		vms, err := parseListOutput(string(data))
+		require.NoError(t, err)
+		assert.Len(t, vms, n)
+
+		for _, vm := range vms {
+			assert.True(t, names[vm.Name], "unexpected VM name %q in output", vm.Name)
+			assert.Equal(t, "lima", vm.Backend)
+			assert.NotEmpty(t, vm.Status)
+		}
+	})
+}
+
+// Property: header line is never parsed as a VM, regardless of format.
+func TestProperty_HeaderNeverParsedAsVM(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		dataLine := rapid.OneOf(
+			rapid.Just("vm1\trunning\tubuntu:24.04\t4\t8GiB\t100GiB"),
+			rapid.Just("vm1\tRunning\t127.0.0.1\tvz\taarch64\t4\t8GiB\t100GiB\t~/.lima/vm1"),
+		).Draw(t, "data_line")
+
+		// Prepend header
+		input := "NAME\tSTATUS\tSSH\tVMTYPE\tARCH\tCPUS\tMEMORY\tDISK\tDIR\n" + dataLine
+		vms, err := parseListOutput(input)
+		require.NoError(t, err)
+
+		for _, vm := range vms {
+			assert.NotEqual(t, "NAME", vm.Name, "header line must not be parsed as a VM")
 		}
 	})
 }

@@ -255,8 +255,49 @@ func TestListVMs_Multiple(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "alpha")
 	assert.Contains(t, out, "beta")
-	// Tab-separated fields
+	// Tab-separated fields with header
 	assert.Contains(t, out, "stopped")
+	assert.True(t, strings.HasPrefix(out, "NAME\t"), "text output should start with header line")
+}
+
+func TestListVMs_JSON(t *testing.T) {
+	Reset()
+	defer Reset()
+
+	require.NoError(t, createTestVM("json-vm"))
+	require.NoError(t, createAndStartVM("json-run"))
+
+	out, err := MockRun([]string{"list", "--json"})
+	require.NoError(t, err)
+
+	var entries []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		CPUs   int    `json:"cpus"`
+		Memory string `json:"memory"`
+		Disk   string `json:"disk"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &entries))
+	assert.Len(t, entries, 2)
+
+	names := make(map[string]bool)
+	for _, e := range entries {
+		names[e.Name] = true
+		assert.Greater(t, e.CPUs, 0)
+		assert.NotEmpty(t, e.Memory)
+		assert.NotEmpty(t, e.Disk)
+	}
+	assert.True(t, names["json-vm"])
+	assert.True(t, names["json-run"])
+}
+
+func TestListVMs_EmptyJSON(t *testing.T) {
+	Reset()
+	defer Reset()
+
+	out, err := MockRun([]string{"list", "--json"})
+	require.NoError(t, err)
+	assert.Equal(t, "[]", out)
 }
 
 // --- Status ---
@@ -927,7 +968,7 @@ func TestProperty_ResetClearsEverything(t *testing.T) {
 }
 
 // TestProperty_ListFormatContainsFields verifies list output always
-// contains tab-separated fields with name, status, image, CPUs, memory, disk.
+// contains tab-separated fields with name, status, SSH, vmType, arch, CPUs, memory, disk, dir.
 func TestProperty_ListFormatContainsFields(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		Reset()
@@ -946,8 +987,8 @@ func TestProperty_ListFormatContainsFields(t *testing.T) {
 			fields := strings.Split(line, "\t")
 			if len(fields) > 0 && fields[0] == name {
 				found = true
-				assert.GreaterOrEqual(t, len(fields), 6,
-					"list output should have at least 6 tab-separated fields")
+				assert.GreaterOrEqual(t, len(fields), 9,
+					"list output should have at least 9 tab-separated fields (real limactl format)")
 				assert.Equal(t, name, fields[0])
 				assert.Equal(t, "stopped", fields[1])
 			}
@@ -1402,12 +1443,17 @@ func TestProperty_StateMachine_ListMatchesModel(t *testing.T) {
 			assert.Equal(t, "", out)
 		} else {
 			lines := strings.Split(out, "\n")
-			assert.Equal(t, len(model.vms), len(lines),
-				"list should have one line per VM")
+			// First line is header (NAME\tSTATUS\t...), rest are VM data
+			assert.GreaterOrEqual(t, len(lines), 2, "list should have header + data lines")
+			assert.Equal(t, "NAME", strings.Split(lines[0], "\t")[0],
+				"first line should be header starting with NAME")
+			dataLines := lines[1:]
+			assert.Equal(t, len(model.vms), len(dataLines),
+				"list should have one data line per VM")
 
 			for name, expectedStatus := range model.vms {
 				found := false
-				for _, line := range lines {
+				for _, line := range dataLines {
 					fields := strings.Split(line, "\t")
 					if len(fields) >= 2 && fields[0] == name {
 						found = true

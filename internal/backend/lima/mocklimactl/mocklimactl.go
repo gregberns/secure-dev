@@ -198,24 +198,82 @@ func deleteVM(args ...string) (string, error) {
 	return fmt.Sprintf("Deleted VM %q", name), nil
 }
 
-// listVMs lists all VMs.
+// listVMs lists all VMs. Supports --json flag for structured output.
+// Text output matches real limactl format: header line followed by data rows.
 func listVMs(args ...string) (string, error) {
 	mu.RLock()
 	defer mu.RUnlock()
 
+	// Check for --json flag
+	useJSON := false
+	for _, arg := range args {
+		if arg == "--json" {
+			useJSON = true
+			break
+		}
+	}
+
 	if len(state) == 0 {
+		if useJSON {
+			return "[]", nil
+		}
 		return "", nil
 	}
 
+	if useJSON {
+		type listEntry struct {
+			Name      string `json:"name"`
+			Status    string `json:"status"`
+			SSH       string `json:"ssh,omitempty"`
+			VMType    string `json:"vmType"`
+			Arch      string `json:"arch"`
+			CPUs      int    `json:"cpus"`
+			Memory    string `json:"memory"`
+			Disk      string `json:"disk"`
+			Dir       string `json:"dir"`
+			BaseImage string `json:"baseImage"`
+		}
+		entries := make([]listEntry, 0, len(state))
+		for name, vm := range state {
+			ssh := ""
+			if vm.Status == "running" {
+				ssh = "127.0.0.1:52215"
+			}
+			entries = append(entries, listEntry{
+				Name:      name,
+				Status:    vm.Status,
+				SSH:       ssh,
+				VMType:    "qemu",
+				Arch:      "aarch64",
+				CPUs:      vm.Config.CPUs,
+				Memory:    vm.Config.Memory,
+				Disk:      vm.Config.Disk,
+				Dir:       fmt.Sprintf("~/.lima/%s", name),
+				BaseImage: vm.Config.BaseImage,
+			})
+		}
+		data, _ := json.MarshalIndent(entries, "", "  ")
+		return string(data), nil
+	}
+
+	// Text output matches real limactl list format with header
 	var output []string
+	output = append(output, "NAME\tSTATUS\tSSH\tVMTYPE\tARCH\tCPUS\tMEMORY\tDISK\tDIR")
 	for name, vm := range state {
-		output = append(output, fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%s",
+		ssh := ""
+		if vm.Status == "running" {
+			ssh = "127.0.0.1:52215"
+		}
+		output = append(output, fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s",
 			name,
 			vm.Status,
-			vm.Config.BaseImage,
+			ssh,
+			"qemu",
+			"aarch64",
 			vm.Config.CPUs,
 			vm.Config.Memory,
 			vm.Config.Disk,
+			fmt.Sprintf("~/.lima/%s", name),
 		))
 	}
 

@@ -200,7 +200,7 @@ func (b *limaBackend) List(ctx context.Context) ([]backend.VMInfo, error) {
 		return nil, fmt.Errorf("list cancelled: %w", err)
 	}
 
-	output, err := b.executor.Run("limactl", "list")
+	output, err := b.executor.Run("limactl", "list", "--json")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list vms: %w", err)
 	}
@@ -295,12 +295,39 @@ func parseStatus(output string) (backend.VMStatus, error) {
 	}
 }
 
-// parseListOutput parses tab-separated limactl list output into VMInfo structs.
+// parseListOutput parses limactl list output into VMInfo structs.
+// Tries JSON first (from limactl list --json), then falls back to
+// tab-separated text parsing with header detection.
 func parseListOutput(output string) ([]backend.VMInfo, error) {
 	if output == "" {
 		return []backend.VMInfo{}, nil
 	}
 
+	// Try JSON parsing first
+	var entries []struct {
+		Name      string `json:"name"`
+		Status    string `json:"status"`
+		CPUs      int    `json:"cpus"`
+		Memory    string `json:"memory"`
+		Disk      string `json:"disk"`
+		Dir       string `json:"dir"`
+	}
+	if err := json.Unmarshal([]byte(output), &entries); err == nil {
+		result := make([]backend.VMInfo, 0, len(entries))
+		for _, e := range entries {
+			result = append(result, backend.VMInfo{
+				Name:    e.Name,
+				Status:  backend.VMStatus(strings.ToLower(e.Status)),
+				Backend: "lima",
+				CPUs:    e.CPUs,
+				Memory:  e.Memory,
+				Disk:    e.Disk,
+			})
+		}
+		return result, nil
+	}
+
+	// Fallback: tab-separated text with header detection
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	result := make([]backend.VMInfo, 0, len(lines))
 
@@ -310,19 +337,30 @@ func parseListOutput(output string) ([]backend.VMInfo, error) {
 			continue
 		}
 
+		// Skip header line
+		if fields[0] == "NAME" || strings.ToUpper(fields[0]) == "NAME" {
+			continue
+		}
+
 		info := backend.VMInfo{
 			Name:    fields[0],
 			Backend: "lima",
 		}
 
-		info.Status = backend.VMStatus(fields[1])
+		info.Status = backend.VMStatus(strings.ToLower(fields[1]))
 
-		// Parse CPUs
-		fmt.Sscanf(fields[3], "%d", &info.CPUs)
-
-		// Memory and Disk
-		info.Memory = fields[4]
-		if len(fields) > 5 {
+		// Parse CPUs — handle both compact (6-field) and real limactl (9-field) formats.
+		// Real limactl: NAME STATUS SSH VMTYPE ARCH CPUS MEMORY DISK DIR
+		// Compact:      NAME STATUS BASE_IMAGE CPUS MEMORY DISK
+		if len(fields) >= 9 {
+			// Real limactl format: CPUS at index 5, MEMORY at 6, DISK at 7
+			fmt.Sscanf(fields[5], "%d", &info.CPUs)
+			info.Memory = fields[6]
+			info.Disk = fields[7]
+		} else {
+			// Compact format: CPUS at index 3, MEMORY at 4, DISK at 5
+			fmt.Sscanf(fields[3], "%d", &info.CPUs)
+			info.Memory = fields[4]
 			info.Disk = fields[5]
 		}
 

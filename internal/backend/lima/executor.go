@@ -49,7 +49,7 @@ func parseVMList(output string) ([]string, error) {
 	names := make([]string, 0, len(lines))
 	for _, line := range lines {
 		fields := strings.Split(line, "\t")
-		if len(fields) > 0 && fields[0] != "" {
+		if len(fields) > 0 && fields[0] != "" && fields[0] != "NAME" {
 			names = append(names, fields[0])
 		}
 	}
