@@ -300,6 +300,9 @@ func (m *mockBackend) SyncTo(ctx context.Context, name, hostPath, guestPath stri
 func (m *mockBackend) SyncFrom(ctx context.Context, name, guestPath, hostPath string) error {
 	return nil
 }
+func (m *mockBackend) SyncDiff(ctx context.Context, name, guestPath, hostPath string) (string, error) {
+	return "", nil
+}
 
 // mockBackendNoSnapshotter doesn't implement Snapshotter.
 type mockBackendNoSnapshotter struct {
@@ -334,6 +337,9 @@ func (m *mockBackendNoSnapshotter) SyncTo(ctx context.Context, name, hostPath, g
 }
 func (m *mockBackendNoSnapshotter) SyncFrom(ctx context.Context, name, guestPath, hostPath string) error {
 	return ErrNotImplemented
+}
+func (m *mockBackendNoSnapshotter) SyncDiff(ctx context.Context, name, guestPath, hostPath string) (string, error) {
+	return "", ErrNotImplemented
 }
 
 // mockBackendNoCloner doesn't implement Cloner.
@@ -379,6 +385,9 @@ func (m *mockBackendNoCloner) SyncTo(ctx context.Context, name, hostPath, guestP
 }
 func (m *mockBackendNoCloner) SyncFrom(ctx context.Context, name, guestPath, hostPath string) error {
 	return ErrNotImplemented
+}
+func (m *mockBackendNoCloner) SyncDiff(ctx context.Context, name, guestPath, hostPath string) (string, error) {
+	return "", ErrNotImplemented
 }
 
 // mockBackendNoSyncer doesn't implement Syncer.

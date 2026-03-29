@@ -128,11 +128,15 @@ type Cloner interface {
 }
 
 // Syncer is an optional interface for backends that support file sync.
-// REQ-003-010
+// REQ-003-010, REQ-007-017
 type Syncer interface {
 	// SyncTo copies files from host to guest.
 	SyncTo(ctx context.Context, name, hostPath, guestPath string) error
 
 	// SyncFrom copies files from guest to host.
 	SyncFrom(ctx context.Context, name, guestPath, hostPath string) error
+
+	// SyncDiff returns a unified diff of files between guest and host without copying.
+	// REQ-007-017
+	SyncDiff(ctx context.Context, name, guestPath, hostPath string) (string, error)
 }

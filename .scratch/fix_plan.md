@@ -119,7 +119,23 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
 - Tests: registration, max args, single VM (human+JSON), all VMs (human+JSON), empty list (human+JSON), VM not found, backend unavailable, backend get error, backend unavailable for all, list error, status error, stopped VM, error status VM, format helpers (full detail, no IP, multiple VMs, empty)
 - Property tests: single VM JSON always valid (5 names x 4 statuses), human contains name (5 names), error codes snake_case (2 codes), all-VMs JSON always valid (empty/single/multiple), all-VMs human has header, table contains all names, JSON required fields, dual-mode consistency
 
-Still missing: sync, config, provision, token, audit, security, diff, logs, completion.
+Still missing: config, provision, token, audit, security, diff, logs, completion.
+
+### Sync command implemented (REQ-007-015, REQ-007-016, REQ-007-017)
+- `internal/cmd/sync.go` with `sd sync` parent and 2 subcommands:
+  - `sd sync to <vm> <host-path> [<guest-path>]` -- sync files from host to VM
+  - `sd sync from <vm> <guest-path> [<host-path>]` -- sync files from VM to host
+- Default destination: `~/<basename>` for sync to, `./<basename>` for sync from
+- `--diff` flag on `sync from` previews differences without copying
+- `--watch` flag on `sync to` (declared but not yet functional -- future work)
+- Checks backend implements `Syncer` interface; returns `sync_not_supported` if not
+- Added `SyncDiff` method to `backend.Syncer` interface (REQ-007-017)
+- Updated mock backends in `registry_test.go` with `SyncDiff` implementations
+- Error codes: `vm_not_found`, `vm_not_running`, `backend_unavailable`, `sync_failed`, `sync_not_supported`, `invalid_argument`
+- Added "sync" to no-config-required list in root.go
+- Digital twin mock backends: `mockSyncBackend` (with Syncer), `mockNoSyncerBackend` (without)
+- Tests: registration, arg validation (sync to/from), human output (to/from), JSON output (to/from), default paths, VM not found, VM not running, backend unavailable, non-syncer backend, sync error, empty name, backend get error, status check error, backend ErrVMNotRunning/ErrVMNotFound, diff human output, diff JSON output, diff error, diff VM not found
+- Property tests: sync to JSON always valid (5 cases), sync from JSON always valid (3 cases), error codes snake_case (6 codes), running VM calls backend once (3 names), stopped VM never calls backend (3 statuses), nonexistent VM never calls backend (3 names), sync from running VM calls backend once (3 names), diff calls SyncDiff not SyncFrom, JSON required fields (sync to + diff), error JSON format
 
 ### Doctor command implemented (REQ-002-007)
 - `internal/cmd/doctor.go` with `sd doctor` command
