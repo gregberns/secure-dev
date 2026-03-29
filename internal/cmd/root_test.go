@@ -202,13 +202,13 @@ func TestPrefixMatchingEnabled(t *testing.T) {
 	assert.True(t, cobra.EnablePrefixMatching)
 }
 
-func TestVersionCommandNotRegistered(t *testing.T) {
+func TestVersionCommandRegistered(t *testing.T) {
 	newRootTestEnv(t)
 
 	root := RootCmd()
 	root.SetArgs([]string{"version"})
 	err := root.Execute()
-	assert.Error(t, err, "version command not yet registered")
+	assert.NoError(t, err, "version command should be registered")
 }
 
 func TestRootEntryDoesNotPanic(t *testing.T) {
