@@ -119,7 +119,37 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
 - Tests: registration, max args, single VM (human+JSON), all VMs (human+JSON), empty list (human+JSON), VM not found, backend unavailable, backend get error, backend unavailable for all, list error, status error, stopped VM, error status VM, format helpers (full detail, no IP, multiple VMs, empty)
 - Property tests: single VM JSON always valid (5 names x 4 statuses), human contains name (5 names), error codes snake_case (2 codes), all-VMs JSON always valid (empty/single/multiple), all-VMs human has header, table contains all names, JSON required fields, dual-mode consistency
 
-Still missing: provision, token, security, diff, logs, completion.
+### Provision command implemented (REQ-006-001, REQ-006-010, REQ-006-015)
+- `internal/provision/provisioner.go` with execution engine:
+  - `ExecFunc` type abstracting backend.Exec for testability
+  - `Provision()` function executing modules in order via backend.Exec
+  - Prepends `set -eux -o pipefail` to all scripts (REQ-006-005)
+  - System mode scripts run via `sudo bash -c` (REQ-006-005)
+  - User mode scripts run via `bash -c` (REQ-006-005)
+  - Tracks `ProvisionState` per module (pending/running/completed/failed)
+  - Stops on first script failure with module and script index tracking
+  - `FormatModuleList()` for human-readable output
+  - `ModuleListEntry` for JSON output
+- `internal/cmd/provision.go` with `sd provision` command and subcommands:
+  - `sd provision <vm>` -- re-provision all modules on a running VM (REQ-006-010)
+  - `sd provision <vm> --modules <list>` -- provision specific modules (REQ-006-010, REQ-006-015)
+  - `sd provision list` -- list available built-in modules (REQ-006-001)
+  - `sd provision list --json` -- list modules in JSON format
+  - VM must be running for provisioning (REQ-006-010)
+  - Module resolution via existing `ResolveRequested`/`ResolveAll` (REQ-006-004, REQ-006-002)
+  - Error codes: `vm_not_found`, `vm_not_running`, `backend_unavailable`, `provision_failed`, `provision_script_failed`, `invalid_argument`
+  - Added "provision" to no-config-required list in root.go
+  - Injectable `loadBuiltinModules` for digital twin testing
+- Tests in `internal/cmd/provision_test.go` (43 tests):
+  - Unit tests: registration, flags, missing/empty name, VM not found, VM not running, backend unavailable, status check error, human output, JSON output, --modules flag filtering, unknown module, script failure, exec error
+  - Provision list tests: human output, JSON output, rejects extra args, contains all builtin modules
+  - Provisioner unit tests: success, system mode uses sudo, user mode no sudo, script preamble, script exit non-zero, exec error, multi-module stops on failure, multi-script in module, second script failure, empty modules, state tracking
+  - Format tests: empty module list, modules with deps
+  - Property tests: JSON always valid, error codes snake_case, running VM calls backend (3 VMs), stopped VM never calls backend (3 statuses), nonexistent VM never calls backend (3 names), JSON required fields, error JSON serializable, embedded FS loads all modules, preamble always applied
+  - Digital twin: `mockProvisionBackend` recording Exec calls with configurable results/errors
+  - `captureStdout` helper using `os.Pipe()` for stdout capture
+
+Still missing: token, security, diff, logs, completion.
 
 ### Config command implemented (REQ-005-009 through REQ-005-013)
 - `internal/cmd/config.go` with `sd config` parent and 5 subcommands:
