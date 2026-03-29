@@ -119,7 +119,19 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
 - Tests: registration, max args, single VM (human+JSON), all VMs (human+JSON), empty list (human+JSON), VM not found, backend unavailable, backend get error, backend unavailable for all, list error, status error, stopped VM, error status VM, format helpers (full detail, no IP, multiple VMs, empty)
 - Property tests: single VM JSON always valid (5 names x 4 statuses), human contains name (5 names), error codes snake_case (2 codes), all-VMs JSON always valid (empty/single/multiple), all-VMs human has header, table contains all names, JSON required fields, dual-mode consistency
 
-Still missing: sync, ssh-config, config, provision, token, audit, security, diff, doctor, logs, completion.
+Still missing: sync, config, provision, token, audit, security, diff, doctor, logs, completion.
+
+### SSH Config command implemented (REQ-007-006)
+- `internal/cmd/ssh_config.go` with `sd ssh-config <vm-name>` command
+- Human output: prints SSH config fragment to stdout (suitable for appending to ~/.ssh/config)
+- TCP format: Host, HostName, Port, User, IdentityFile, StrictHostKeyChecking yes, UserKnownHostsFile per-VM, ForwardAgent/X11 no, LogLevel ERROR, SendEnv
+- VSOCK format: Host, User, IdentityFile, ProxyCommand, StrictHostKeyChecking no, UserKnownHostsFile /dev/null, same security directives
+- JSON output: `{"ok": true, "data": {"host": "sd-<name>", "hostname": ..., "port": ..., "user": ..., "identity_file": ..., "proxy_command": ..., "transport": ...}}`
+- Error codes: `vm_not_found`, `backend_unavailable`, `ssh_connection_failed`, `invalid_argument`
+- Digital twin mock backend (`mockSSHConfigBackend`) with configurable SSH config map and errors
+- Unit tests: registration, exact args, human output (TCP/VSOCK), JSON output (TCP/VSOCK), VM not found, backend unavailable, backend get error, SSH config error, empty name, missing name, formatSSHConfigFragment (TCP, VSOCK, default user, default host)
+- Property tests: JSON always valid (5 cases: TCP standard, VSOCK standard, high port, low port, proxy), human contains Host line (4 names), error codes snake_case (4 codes), nonexistent VM never succeeds (3 names), JSON required fields, TCP has required directives, VSOCK has ProxyCommand vs TCP has Port, ForwardAgent/X11 always no (2 transports)
+- Added "ssh-config" to no-config-required list in root.go
 - `internal/cmd/snapshot.go` with `sd snapshot` parent and 4 subcommands:
   - `sd snapshot create <vm> --tag <tag>` -- create named snapshot
   - `sd snapshot list <vm>` -- list snapshots (tab-formatted human, JSON array)

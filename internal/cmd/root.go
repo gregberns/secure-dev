@@ -56,7 +56,7 @@ credential injection, and session management.`,
 			// Commands that don't require config should still succeed
 			// when config file doesn't exist
 			requiresConfig := true
-			for _, name := range []string{"version", "help", "completion", "doctor", "list", "status", "connect"} {
+			for _, name := range []string{"version", "help", "completion", "doctor", "list", "status", "connect", "ssh-config"} {
 				if cmd.Name() == name {
 					requiresConfig = false
 					break
