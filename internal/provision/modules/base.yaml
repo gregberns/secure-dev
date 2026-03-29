@@ -1,0 +1,20 @@
+name: base
+description: "Core system packages: git, curl, build-essential, ca-certificates, jq, tmux, vim"
+scripts:
+  - mode: system
+    script: |
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        build-essential \
+        ca-certificates \
+        jq \
+        tmux \
+        vim
+      rm -rf /var/lib/apt/lists/*
+probe:
+  command: "command -v git && command -v curl && command -v jq && command -v tmux"
+  interval: 5s
+  timeout: 5m

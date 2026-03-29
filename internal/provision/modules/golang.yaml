@@ -1,0 +1,30 @@
+name: golang
+description: "Go toolchain (current stable release)"
+depends_on:
+  - base
+scripts:
+  - mode: system
+    script: |
+      if command -v go >/dev/null 2>&1; then
+        echo "Go already installed: $(go version)"
+        exit 0
+      fi
+      GO_VERSION="1.23.4"
+      ARCH="$(dpkg --print-architecture)"
+      curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
+        -o /tmp/go.tar.gz
+      echo "${GO_CHECKSUM}  /tmp/go.tar.gz" | sha256sum -c -
+      rm -rf /usr/local/go
+      tar -C /usr/local -xzf /tmp/go.tar.gz
+      rm -f /tmp/go.tar.gz
+  - mode: user
+    script: |
+      grep -q '/usr/local/go/bin' ~/.profile 2>/dev/null || \
+        echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.profile
+checksums:
+  go1.23.4.linux-arm64.tar.gz: "16e5017863a7f6071363571571ee35fcdacf27bc0569a9a1e4be76e3a51e00a4"
+  go1.23.4.linux-amd64.tar.gz: "6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971"
+probe:
+  command: "go version"
+  interval: 5s
+  timeout: 2m

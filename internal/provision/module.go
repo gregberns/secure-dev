@@ -5,10 +5,13 @@ package provision
 
 import (
 	"fmt"
+	"io/fs"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
+	"sd/internal/provision/modules"
 	"gopkg.in/yaml.v3"
 )
 
@@ -213,3 +216,69 @@ var moduleNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`)
 func isValidModuleName(name string) bool {
 	return moduleNamePattern.MatchString(name)
 }
+
+// BuiltinModuleNames is the list of built-in module names in the order they
+// should appear in listings. REQ-006-001.
+var BuiltinModuleNames = []string{
+	"base",
+	"claude-code",
+	"docker",
+	"golang",
+	"rust",
+	"python",
+	"github-cli",
+}
+
+// LoadBuiltinModules reads all embedded module YAML files, parses them,
+// validates them, and returns them in canonical order.
+// REQ-006-014: Built-in modules loaded from embedded FS.
+// REQ-006-001: Built-in module set.
+func LoadBuiltinModules() ([]Module, error) {
+	entries, err := fs.ReadDir(modules.ModuleFS, ".")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read embedded modules: %w", err)
+	}
+
+	parsed := make(map[string]*Module)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		data, err := fs.ReadFile(modules.ModuleFS, entry.Name())
+		if err != nil {
+			return nil, fmt.Errorf("failed to read embedded module %q: %w", entry.Name(), err)
+		}
+		m, err := ParseModule(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse embedded module %q: %w", entry.Name(), err)
+		}
+		if err := m.Validate(); err != nil {
+			return nil, fmt.Errorf("embedded module %q failed validation: %w", entry.Name(), err)
+		}
+		parsed[m.Name] = m
+	}
+
+	// Return in canonical order.
+	result := make([]Module, 0, len(BuiltinModuleNames))
+	for _, name := range BuiltinModuleNames {
+		m, ok := parsed[name]
+		if !ok {
+			return nil, fmt.Errorf("built-in module %q not found in embedded FS", name)
+		}
+		result = append(result, *m)
+		delete(parsed, name)
+	}
+
+	// Append any extra modules not in the canonical list (sorted for determinism).
+	extraNames := make([]string, 0, len(parsed))
+	for name := range parsed {
+		extraNames = append(extraNames, name)
+	}
+	sort.Strings(extraNames)
+	for _, name := range extraNames {
+		result = append(result, *parsed[name])
+	}
+
+	return result, nil
+}
+

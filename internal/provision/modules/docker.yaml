@@ -1,0 +1,38 @@
+name: docker
+description: "Docker Engine with rootless setup"
+depends_on:
+  - base
+scripts:
+  - mode: system
+    script: |
+      if command -v docker >/dev/null 2>&1; then
+        echo "Docker already installed: $(docker --version)"
+        exit 0
+      fi
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y --no-install-recommends \
+        ca-certificates \
+        gnupg
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL "https://download.docker.com/linux/ubuntu/gpg" -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update -y
+      apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+      rm -rf /var/lib/apt/lists/*
+  - mode: system
+    script: |
+      # Enable rootless Docker for the default user
+      if id "dev" >/dev/null 2>&1; then
+        USER=dev
+      else
+        USER=$(id -nu 1000 2>/dev/null || echo "ubuntu")
+      fi
+      # Create docker group and add user
+      getent group docker >/dev/null || groupadd docker
+      usermod -aG docker "$USER"
+probe:
+  command: "docker --version"
+  interval: 5s
+  timeout: 5m

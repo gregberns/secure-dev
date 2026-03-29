@@ -249,8 +249,28 @@ Still missing: provision, token, security, diff, logs, completion.
 - Property tests: JSON always valid (5 cases), running VM calls SSH runner (5 names), error codes snake_case (6 codes), nonexistent VM never calls SSH runner (3 names), JSON required fields, invalid session names always fail (5 names), VSOCK no StrictHostKeyChecking, TCP has StrictHostKeyChecking, ForwardAgent always no, ForwardX11 always no
 - Added "connect" to no-config-required list in root.go
 
-### No embedded provisioning modules
-REQ-006-001, REQ-006-014: No modules under internal/provision/modules/.
+### Embedded provisioning modules implemented (REQ-006-001, REQ-006-014)
+- `internal/provision/modules/` with 7 built-in module YAML files:
+  - `base.yaml` -- git, curl, build-essential, ca-certificates, jq, tmux, vim
+  - `claude-code.yaml` -- Node.js via nvm, Claude Code CLI via npm (with checksums)
+  - `docker.yaml` -- Docker Engine with rootless setup
+  - `golang.yaml` -- Go 1.23.4 toolchain (with checksums for amd64/arm64)
+  - `rust.yaml` -- Rust toolchain via rustup (with checksums)
+  - `python.yaml` -- Python 3 with pip and venv
+  - `github-cli.yaml` -- GitHub CLI gh 2.67.0 (with checksums for amd64/arm64)
+- `internal/provision/modules/embed.go` with `//go:embed *.yaml` directive
+- `LoadBuiltinModules()` function loading embedded YAML, parsing, validating, returning in canonical order
+- `BuiltinModuleNames` ordered list for consistent listing
+- All modules follow REQ-006-003 YAML schema: name, description, depends_on, scripts (system/user), checksums, probe
+- All modules have readiness probes (REQ-006-008)
+- Non-base modules depend on base (REQ-006-002)
+- Download modules (golang, claude-code, rust, github-cli) have SHA-256 checksums (REQ-006-016)
+- No curl|sh patterns in any module (REQ-006-016)
+- All modules use idempotent guards (command -v / already installed checks) (REQ-006-006)
+- Tests in `internal/provision/modules_test.go` (22 tests):
+  - Unit tests: all present, count=7, all valid, descriptions, scripts, base no deps, non-base depends on base, base installs all 7 packages, claude-code installs node+claude, golang has checksums, download modules have checksums, no curl|sh, all probes present, probe defaults, idempotent guards, script modes valid, resolve all succeeds, resolve single module (6 subtests)
+  - Property tests: always succeeds (100), all names valid (100), resolve any subset (100), no duplicate names (100), scripts not empty (100)
+  - Benchmarks: LoadBuiltinModules, ResolveBuiltinModules
 
 ### No Syncer or Cloner implementations
 REQ-003-009, REQ-003-010: Interfaces defined but no backend implements them.
