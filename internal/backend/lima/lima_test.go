@@ -86,9 +86,6 @@ func TestLimaYAML_NoMountsByDefault(t *testing.T) {
 		// Check if location: appears after mounts:
 		mountsIdx := strings.Index(yaml, "mounts:")
 		if mountsIdx > 0 {
-			afterMounts := yaml[mountsIdx:]
-			// Look for image location vs mount location
-			// This is a simple check - in real testing would parse YAML properly
 		}
 	}
 }
@@ -365,7 +362,7 @@ func TestLimaYAML_ProvisioningScripts(t *testing.T) {
 		{
 			name:    "no-scripts",
 			scripts: []backend.ProvisionScript{},
-			expectFn: func(y string) bool { return !strings.Contains(yaml "provision:") },
+			expectFn: func(y string) bool { return !strings.Contains(y, "provision:") },
 		},
 	}
 
