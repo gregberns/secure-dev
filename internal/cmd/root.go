@@ -52,10 +52,18 @@ credential injection, and session management.`,
 			loader = config.NewLoader(loaderOpts...)
 
 			// Commands that don't require config should still succeed
-			// when config file doesn't exist
+			// when config file doesn't exist. Walk parent chain so that
+			// subcommands of no-config parents (e.g., "config get") are
+			// also covered.
 			requiresConfig := true
-			for _, name := range []string{"version", "help", "completion", "doctor", "list", "status", "connect", "ssh-config", "sync", "audit"} {
-				if cmd.Name() == name {
+			noConfigCmds := map[string]bool{
+				"version": true, "help": true, "completion": true,
+				"doctor": true, "list": true, "status": true,
+				"connect": true, "ssh-config": true, "sync": true,
+				"audit": true, "config": true,
+			}
+			for c := cmd; c != nil; c = c.Parent() {
+				if noConfigCmds[c.Name()] {
 					requiresConfig = false
 					break
 				}

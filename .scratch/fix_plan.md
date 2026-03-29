@@ -119,7 +119,31 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
 - Tests: registration, max args, single VM (human+JSON), all VMs (human+JSON), empty list (human+JSON), VM not found, backend unavailable, backend get error, backend unavailable for all, list error, status error, stopped VM, error status VM, format helpers (full detail, no IP, multiple VMs, empty)
 - Property tests: single VM JSON always valid (5 names x 4 statuses), human contains name (5 names), error codes snake_case (2 codes), all-VMs JSON always valid (empty/single/multiple), all-VMs human has header, table contains all names, JSON required fields, dual-mode consistency
 
-Still missing: config, provision, token, security, diff, logs, completion.
+Still missing: provision, token, security, diff, logs, completion.
+
+### Config command implemented (REQ-005-009 through REQ-005-013)
+- `internal/cmd/config.go` with `sd config` parent and 5 subcommands:
+  - `sd config get <key>` -- display resolved value with source (REQ-005-009)
+  - `sd config set <key> <value>` -- write key-value to user-level config (REQ-005-010)
+  - `sd config list` -- display all config values with sources (REQ-005-011)
+  - `sd config edit` -- open config file in $EDITOR (REQ-005-012)
+  - `sd config validate` -- validate all config files (REQ-005-013)
+- Human output: tab-formatted tables for list, per-line status for get/validate
+- JSON output: standard `{"ok": true, "data": ...}` envelope for all subcommands
+- Value formatting: arrays show `[N entries]`, empty shows `(not set)` in human mode
+- Type coercion: JSON arrays for list values, int for numeric keys like `defaults.cpus`
+- Source tracking: `built-in default`, `environment variable`, `user-level config`, `project-level config`
+- Set rollback: validates after write, rolls back on validation failure
+- Edit: creates template file if not exists, rejects in JSON mode, uses $EDITOR/$VISUAL/vi
+- Injectable `runEditorCmd` for digital twin testing
+- Added `GetKey(key string) (any, error)` and `ProjectDir() string` to config.Loader
+- Fixed `Source()` method bug: removed incorrect `viper.IsSet()` check that returned `user-level config` for default values
+- Updated root.go no-config-required check to walk parent command chain (handles subcommands)
+- Error codes: `invalid_argument`, `config_not_loaded`, `config_query_failed`, `config_set_failed`, `invalid_config`, `config_edit_failed`
+- Added "config" to no-config-required list in root.go
+- Tests: registration (with subcommand verification), get (human, JSON, defaults, all keys, unknown key, empty key, VM default), set (create, update, JSON, numeric, array, missing args), list (defaults, with config, JSON, extra args rejection), validate (no files, valid, invalid YAML, invalid mount policy, JSON valid, JSON invalid), edit (JSON rejection, opens editor, creates template, uses EDITOR env, editor failure)
+- Unit tests: isKnownConfigKey, formatConfigValue, parseConfigValue, resolveEditor, formatConfigTable, formatValidateOutput
+- Property tests: get JSON always valid (8 keys), list JSON always valid (3 configs), validate JSON always valid (3 cases), error codes snake_case (3 cases), list contains all known keys, set-get round-trip (3 keys), source tracking (env, user config, default)
 
 ### Audit command implemented (REQ-002-008, REQ-004-021, REQ-004-022)
 - `internal/cmd/audit.go` with `sd audit [<vm>]` command

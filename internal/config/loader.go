@@ -266,19 +266,30 @@ func (l *Loader) Source(key string) Source {
 		return src
 	}
 
-	// Check if set via environment variable
+	// Check if set via environment variable (for keys not in snapshot)
 	envKey := "SD_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
 	if os.Getenv(envKey) != "" {
 		return SourceEnv
 	}
 
-	// Check if set in viper (would be from config file)
-	if l.v.IsSet(key) {
-		// Determine which config file it came from
-		return SourceUserConfig
-	}
-
+	// Not in sourceMap and not from env: it's a built-in default
 	return SourceDefault
+}
+
+// GetKey returns the resolved value for a configuration key.
+// REQ-005-009: Used by config get command to retrieve values by dotted key.
+func (l *Loader) GetKey(key string) (any, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.v == nil {
+		return nil, fmt.Errorf("config not loaded")
+	}
+	return l.v.Get(key), nil
+}
+
+// ProjectDir returns the project-level config directory path.
+func (l *Loader) ProjectDir() string {
+	return l.projectDir
 }
 
 // Warnings returns warnings collected during loading.
