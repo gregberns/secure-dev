@@ -352,6 +352,28 @@ Wired into create (CaptureHostKey), connect (VerifyHostKey), and destroy (Remove
 - `destroy.go`: cleans up SSH directory on VM destruction
 - Tests in create_test.go, connect_test.go, destroy_test.go with digital twin overrides
 
+### Completion command implemented (REQ-002-017)
+- `internal/cmd/completion.go` with `sd completion <shell>` command
+- Generates shell completion scripts for bash, zsh, and fish using Cobra's built-in generators
+- Help text includes installation instructions for each shell (source commands, file paths)
+- ValidArgs set to ["bash", "zsh", "fish"] for tab completion of shell names
+- Unsupported shells return `invalid_argument` error with snake_case code
+- `DisableFlagParsing` set to prevent flag interference with generated scripts
+- Custom completion functions registered:
+  - `vmNameCompletion`: completes VM names from backend.List()
+  - `backendNameCompletion`: completes --backend from backend.List()
+  - `snapshotTagCompletion`: completes --tag from Snapshotter.SnapshotList()
+  - `moduleNameCompletion`: completes --modules from provision.BuiltinModuleNames
+- `requiresVMCompletion` helper detects commands with VM name args via Use string
+- Completion registered in "utility" command group
+- Added to no-config-required list (already present in root.go)
+- Tests in `internal/cmd/completion_test.go` (36 tests):
+  - Unit tests: registration, group ID, no-config, exact args, bash/zsh/fish output, bash/zsh/fish contains "sd", unsupported shell (CLIError with invalid_argument code), help contains installation instructions for all 3 shells, valid args (bash/zsh/fish), disable flag parsing
+  - Completion function tests: VM names (returns names, backend unavailable returns nil, empty list, list error), backend names, module names (all 7 built-in), snapshot tags (returns tags, no VM arg, non-snapshotter backend)
+  - requiresVMCompletion table-driven tests (11 cases)
+  - Property tests: bash always produces output, zsh always produces output, fish always produces output, invalid shell always fails, error codes snake_case (6 subtests), bash script contains "sd", module names always complete (NoFileComp + non-empty), VM names match list (4 sets), snapshot tags match list (3 sets), backend unavailable returns NoFileComp
+  - Digital twins: mockCompletionBackend (Backend + Snapshotter), mockNonSnapshotterCompletionBackend (Backend only)
+
 ### No CI workflow change detection
 REQ-004-018: Not implemented.
 
