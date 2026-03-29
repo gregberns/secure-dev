@@ -459,5 +459,112 @@ func isSensitiveKey(key string) bool {
 	return false
 }
 
+// --- REQ-003-008 / REQ-003-018: Snapshotter Interface ---
+
+// SnapshotCreate creates a named snapshot of the VM's current state.
+// REQ-003-008, REQ-003-018
+func (b *limaBackend) SnapshotCreate(ctx context.Context, name, tag string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("snapshot create cancelled for %q: %w", name, err)
+	}
+
+	_, err := b.executor.Run("limactl", "snapshot", "create", name, tag)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
+		}
+		return fmt.Errorf("failed to create snapshot %q for vm %q: %w", tag, name, err)
+	}
+
+	return nil
+}
+
+// SnapshotApply restores a VM to a previously saved snapshot.
+// REQ-003-008, REQ-003-018
+func (b *limaBackend) SnapshotApply(ctx context.Context, name, tag string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("snapshot apply cancelled for %q: %w", name, err)
+	}
+
+	_, err := b.executor.Run("limactl", "snapshot", "restore", name, tag)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("snapshot %q not found for vm %q: %w", tag, name, backend.ErrSnapshotNotFound)
+		}
+		return fmt.Errorf("failed to apply snapshot %q for vm %q: %w", tag, name, err)
+	}
+
+	return nil
+}
+
+// SnapshotDelete removes a named snapshot.
+// REQ-003-008, REQ-003-018
+func (b *limaBackend) SnapshotDelete(ctx context.Context, name, tag string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("snapshot delete cancelled for %q: %w", name, err)
+	}
+
+	_, err := b.executor.Run("limactl", "snapshot", "delete", name, tag)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("snapshot %q not found for vm %q: %w", tag, name, backend.ErrSnapshotNotFound)
+		}
+		return fmt.Errorf("failed to delete snapshot %q for vm %q: %w", tag, name, err)
+	}
+
+	return nil
+}
+
+// SnapshotList returns all snapshots for a given VM.
+// REQ-003-008, REQ-003-018
+func (b *limaBackend) SnapshotList(ctx context.Context, name string) ([]backend.SnapshotInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("snapshot list cancelled for %q: %w", name, err)
+	}
+
+	output, err := b.executor.Run("limactl", "snapshot", "list", name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
+		}
+		return nil, fmt.Errorf("failed to list snapshots for vm %q: %w", name, err)
+	}
+
+	return parseSnapshotList(output)
+}
+
+// parseSnapshotList parses tab-separated snapshot list output.
+func parseSnapshotList(output string) ([]backend.SnapshotInfo, error) {
+	if output == "" || strings.HasPrefix(output, "No snapshots") {
+		return []backend.SnapshotInfo{}, nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	result := make([]backend.SnapshotInfo, 0, len(lines))
+
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 3 {
+			continue
+		}
+
+		createdAt, err := time.Parse(time.RFC3339, fields[1])
+		if err != nil {
+			continue
+		}
+
+		var size int64
+		fmt.Sscanf(fields[2], "%d", &size)
+
+		result = append(result, backend.SnapshotInfo{
+			Name:      fields[0],
+			CreatedAt: createdAt,
+			Size:      size,
+		})
+	}
+
+	return result, nil
+}
+
 // now returns the current time. Extracted for testability.
 var now = time.Now
