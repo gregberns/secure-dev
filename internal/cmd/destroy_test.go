@@ -26,6 +26,14 @@ type mockDestroyBackend struct {
 	statusMap   map[string]backend.VMStatus
 }
 
+// mockDestroySnapshotBackend extends mockDestroyBackend with Snapshotter support.
+// REQ-004-019: digital twin for auto-snapshot before destroy testing.
+type mockDestroySnapshotBackend struct {
+	mockDestroyBackend
+	snapshots    []string // tags of created snapshots
+	snapshotErr  error    // error to return from SnapshotCreate
+}
+
 func (m *mockDestroyBackend) Name() string { return m.name }
 func (m *mockDestroyBackend) Available() error {
 	if m.available {
@@ -61,6 +69,20 @@ func (m *mockDestroyBackend) Exec(_ context.Context, _ string, _ []string) (back
 	return backend.ExecResult{}, nil
 }
 
+// Snapshotter interface methods for mockDestroySnapshotBackend.
+func (m *mockDestroySnapshotBackend) SnapshotCreate(_ context.Context, _, tag string) error {
+	if m.snapshotErr != nil {
+		return m.snapshotErr
+	}
+	m.snapshots = append(m.snapshots, tag)
+	return nil
+}
+func (m *mockDestroySnapshotBackend) SnapshotApply(_ context.Context, _, _ string) error { return nil }
+func (m *mockDestroySnapshotBackend) SnapshotDelete(_ context.Context, _, _ string) error { return nil }
+func (m *mockDestroySnapshotBackend) SnapshotList(_ context.Context, _ string) ([]backend.SnapshotInfo, error) {
+	return nil, nil
+}
+
 // setupDestroyTest configures the test environment with a mock backend.
 // Returns the mock so tests can inspect recorded calls.
 func setupDestroyTest(t *testing.T, mb *mockDestroyBackend) {
@@ -72,6 +94,7 @@ func setupDestroyTest(t *testing.T, mb *mockDestroyBackend) {
 	for _, cmd := range root.Commands() {
 		if cmd.Name() == "destroy" {
 			_ = cmd.Flags().Set("force", "false")
+			_ = cmd.Flags().Set("no-snapshot", "false")
 			break
 		}
 	}
@@ -81,6 +104,32 @@ func setupDestroyTest(t *testing.T, mb *mockDestroyBackend) {
 		return mb, nil
 	}
 	t.Cleanup(func() { getBackendFunc = origGetBackend })
+}
+
+// setupDestroySnapshotTest configures the test environment with a snapshot-capable mock backend.
+func setupDestroySnapshotTest(t *testing.T, mb *mockDestroySnapshotBackend) {
+	t.Helper()
+	newRootTestEnv(t)
+
+	root := RootCmd()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "destroy" {
+			_ = cmd.Flags().Set("force", "false")
+			_ = cmd.Flags().Set("no-snapshot", "false")
+			break
+		}
+	}
+
+	origGetBackend := getBackendFunc
+	getBackendFunc = func(name string) (backend.Backend, error) {
+		return mb, nil
+	}
+	t.Cleanup(func() { getBackendFunc = origGetBackend })
+
+	// Use a fixed snapshot tag for deterministic tests
+	origAutoSnapshotTag := autoSnapshotTag
+	autoSnapshotTag = func(name string) string { return "pre-destroy-20260329-120000" }
+	t.Cleanup(func() { autoSnapshotTag = origAutoSnapshotTag })
 }
 
 // --- Unit tests ---
@@ -577,6 +626,404 @@ func TestProperty_Destroy_SSHCleanupFailureNonFatal(t *testing.T) {
 			err := root.Execute()
 
 			require.NoError(t, err, "destroy must succeed despite SSH cleanup failure for %q", name)
+		})
+	}
+}
+
+// --- REQ-004-019: Snapshot Before Destructive Operations ---
+
+func TestDestroyCommand_NoSnapshotFlag(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+
+	cmd, _, err := root.Find([]string{"destroy"})
+	require.NoError(t, err)
+
+	flag := cmd.Flags().Lookup("no-snapshot")
+	require.NotNil(t, flag, "must have --no-snapshot flag")
+	assert.Equal(t, "false", flag.DefValue)
+}
+
+// Test that auto-snapshot is created when backend supports Snapshotter.
+func TestDestroyCommand_AutoSnapshot_Created(t *testing.T) {
+	mb := &mockDestroySnapshotBackend{
+		mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+	}
+	setupDestroySnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"destroy", "testvm", "--force"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	require.Len(t, mb.destroyed, 1)
+	assert.Equal(t, "testvm", mb.destroyed[0])
+	require.Len(t, mb.snapshots, 1, "auto-snapshot must be created before destroy")
+	assert.Equal(t, "pre-destroy-20260329-120000", mb.snapshots[0])
+}
+
+// Test that auto-snapshot tag appears in human output.
+func TestDestroyCommand_AutoSnapshot_HumanOutput(t *testing.T) {
+	mb := &mockDestroySnapshotBackend{
+		mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+	}
+	setupDestroySnapshotTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"destroy", "testvm", "--force"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+	output := buf.String()
+	assert.Contains(t, output, "testvm")
+	assert.Contains(t, output, "destroyed")
+	assert.Contains(t, output, "Safety snapshot")
+	assert.Contains(t, output, "pre-destroy-20260329-120000")
+}
+
+// Test that auto-snapshot tag appears in JSON output.
+func TestDestroyCommand_AutoSnapshot_JSONOutput(t *testing.T) {
+	mb := &mockDestroySnapshotBackend{
+		mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+	}
+	setupDestroySnapshotTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "destroy", "testvm", "--force"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "testvm", data["name"])
+	assert.Equal(t, "pre-destroy-20260329-120000", data["snapshot_tag"])
+}
+
+// Test that --no-snapshot skips auto-snapshot.
+func TestDestroyCommand_NoSnapshotFlag_SkipsSnapshot(t *testing.T) {
+	mb := &mockDestroySnapshotBackend{
+		mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+	}
+	setupDestroySnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"destroy", "testvm", "--force", "--no-snapshot"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	require.Len(t, mb.destroyed, 1)
+	assert.Empty(t, mb.snapshots, "no snapshot should be created with --no-snapshot")
+}
+
+// Test that --no-snapshot JSON output has no snapshot_tag.
+func TestDestroyCommand_NoSnapshotFlag_JSONOutput(t *testing.T) {
+	mb := &mockDestroySnapshotBackend{
+		mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+	}
+	setupDestroySnapshotTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "destroy", "testvm", "--force", "--no-snapshot"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err)
+
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "testvm", data["name"])
+	assert.Nil(t, data["snapshot_tag"], "snapshot_tag must be absent with --no-snapshot")
+}
+
+// Test that snapshot failure is non-fatal (destroy proceeds).
+func TestDestroyCommand_SnapshotFailure_NonFatal(t *testing.T) {
+	mb := &mockDestroySnapshotBackend{
+		mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+		snapshotErr:        fmt.Errorf("disk full for snapshots"),
+	}
+	setupDestroySnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"destroy", "testvm", "--force"})
+	err := root.Execute()
+
+	require.NoError(t, err, "destroy must succeed despite snapshot failure")
+	require.Len(t, mb.destroyed, 1, "destroy must proceed after snapshot failure")
+	assert.Empty(t, mb.snapshots, "no snapshot should be recorded on failure")
+}
+
+// Test that snapshot failure JSON has no snapshot_tag.
+func TestDestroyCommand_SnapshotFailure_JSONNoTag(t *testing.T) {
+	mb := &mockDestroySnapshotBackend{
+		mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+		snapshotErr:        fmt.Errorf("snapshot error"),
+	}
+	setupDestroySnapshotTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "destroy", "testvm", "--force"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err)
+
+	data := result["data"].(map[string]any)
+	assert.Nil(t, data["snapshot_tag"], "snapshot_tag must be absent on snapshot failure")
+}
+
+// Test that non-snapshotter backends proceed without auto-snapshot.
+func TestDestroyCommand_NonSnapshotterBackend_NoAutoSnapshot(t *testing.T) {
+	mb := &mockDestroyBackend{name: "mock", available: true}
+	setupDestroyTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"destroy", "testvm", "--force"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	require.Len(t, mb.destroyed, 1)
+}
+
+// Test that non-snapshotter backend JSON output has no snapshot_tag.
+func TestDestroyCommand_NonSnapshotterBackend_JSONNoTag(t *testing.T) {
+	mb := &mockDestroyBackend{name: "mock", available: true}
+	setupDestroyTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "destroy", "testvm", "--force"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err)
+
+	data := result["data"].(map[string]any)
+	assert.Nil(t, data["snapshot_tag"], "snapshot_tag must be absent for non-snapshotter backend")
+}
+
+// --- REQ-004-019 Property-based tests ---
+
+// Property: destroy with snapshotting backend always creates exactly one snapshot.
+func TestProperty_Destroy_SnapshotterAlwaysSnapshots(t *testing.T) {
+	for _, name := range []string{"vm1", "vm2", "test-vm", "alpha", "prod-vm"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockDestroySnapshotBackend{
+				mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+			}
+			setupDestroySnapshotTest(t, mb)
+
+			root := RootCmd()
+			root.SetArgs([]string{"destroy", name, "--force"})
+			err := root.Execute()
+
+			require.NoError(t, err)
+			require.Len(t, mb.snapshots, 1, "must create exactly one auto-snapshot for %q", name)
+			assert.Contains(t, mb.snapshots[0], "pre-destroy-", "snapshot tag must contain prefix for %q", name)
+		})
+	}
+}
+
+// Property: --no-snapshot never creates a snapshot.
+func TestProperty_Destroy_NoSnapshotNeverCreates(t *testing.T) {
+	for _, name := range []string{"vm1", "vm2", "test-vm", "alpha", "prod-vm"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockDestroySnapshotBackend{
+				mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+			}
+			setupDestroySnapshotTest(t, mb)
+
+			root := RootCmd()
+			root.SetArgs([]string{"destroy", name, "--force", "--no-snapshot"})
+			err := root.Execute()
+
+			require.NoError(t, err)
+			assert.Empty(t, mb.snapshots, "--no-snapshot must never create snapshots for %q", name)
+		})
+	}
+}
+
+// Property: auto-snapshot JSON always valid with snapshot_tag.
+func TestProperty_Destroy_AutoSnapshotJSONValid(t *testing.T) {
+	for _, name := range []string{"vm1", "vm2", "test-vm", "alpha", "prod-vm"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockDestroySnapshotBackend{
+				mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+			}
+			setupDestroySnapshotTest(t, mb)
+
+			oldStdout := os.Stdout
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			os.Stdout = w
+
+			root := RootCmd()
+			root.SetArgs([]string{"--json", "destroy", name, "--force"})
+			execErr := root.Execute()
+
+			w.Close()
+			os.Stdout = oldStdout
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+
+			require.NoError(t, execErr)
+
+			var result map[string]any
+			err = json.Unmarshal(buf.Bytes(), &result)
+			require.NoError(t, err, "JSON must parse for %q: %s", name, buf.String())
+
+			assert.True(t, result["ok"].(bool))
+			data := result["data"].(map[string]any)
+			assert.Equal(t, name, data["name"])
+			assert.NotNil(t, data["snapshot_tag"], "snapshot_tag must be present for %q", name)
+		})
+	}
+}
+
+// Property: non-snapshotter backend never has snapshot_tag in JSON.
+func TestProperty_Destroy_NonSnapshotterJSONNoTag(t *testing.T) {
+	for _, name := range []string{"vm1", "vm2", "test-vm"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockDestroyBackend{name: "mock", available: true}
+			setupDestroyTest(t, mb)
+
+			oldStdout := os.Stdout
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			os.Stdout = w
+
+			root := RootCmd()
+			root.SetArgs([]string{"--json", "destroy", name, "--force"})
+			execErr := root.Execute()
+
+			w.Close()
+			os.Stdout = oldStdout
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+
+			require.NoError(t, execErr)
+
+			var result map[string]any
+			err = json.Unmarshal(buf.Bytes(), &result)
+			require.NoError(t, err)
+
+			data := result["data"].(map[string]any)
+			assert.Nil(t, data["snapshot_tag"], "non-snapshotter backend must not have snapshot_tag for %q", name)
+		})
+	}
+}
+
+// Property: snapshot failure never prevents destroy.
+func TestProperty_Destroy_SnapshotFailureNeverBlocks(t *testing.T) {
+	for _, name := range []string{"vm1", "vm2", "vm3"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockDestroySnapshotBackend{
+				mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+				snapshotErr:        fmt.Errorf("snapshot failed: %s", name),
+			}
+			setupDestroySnapshotTest(t, mb)
+
+			root := RootCmd()
+			root.SetArgs([]string{"destroy", name, "--force"})
+			err := root.Execute()
+
+			require.NoError(t, err, "destroy must succeed despite snapshot failure for %q", name)
+			require.Len(t, mb.destroyed, 1, "destroy must be called for %q", name)
+		})
+	}
+}
+
+// Property: snapshot tag always has pre-destroy prefix.
+func TestProperty_Destroy_SnapshotTagPrefix(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("vm-%d", i)
+		t.Run(name, func(t *testing.T) {
+			mb := &mockDestroySnapshotBackend{
+				mockDestroyBackend: mockDestroyBackend{name: "mock", available: true},
+			}
+			setupDestroySnapshotTest(t, mb)
+
+			// Use a unique tag for each iteration
+			tagNum := fmt.Sprintf("pre-destroy-20260329-%06d", i*10000)
+			origAutoSnapshotTag := autoSnapshotTag
+			autoSnapshotTag = func(name string) string { return tagNum }
+			defer func() { autoSnapshotTag = origAutoSnapshotTag }()
+
+			root := RootCmd()
+			root.SetArgs([]string{"destroy", name, "--force"})
+			err := root.Execute()
+
+			require.NoError(t, err)
+			require.Len(t, mb.snapshots, 1)
+			assert.Contains(t, mb.snapshots[0], "pre-destroy-", "tag must have pre-destroy prefix for %q", name)
 		})
 	}
 }

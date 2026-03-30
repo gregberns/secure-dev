@@ -588,3 +588,17 @@ REQ-007-005: Implemented VSOCK/TCP transport detection in SSHConfig.
   - Property tests: SendEnv always present (TCP + VSOCK), credential key filtering (4 include + 7 exclude)
 - Updated all existing sshRunner overrides to accept env parameter (11 test sites)
 - Updated modules_test.go: AcceptEnv added to required sshd directives list
+
+### REQ-004-019: Snapshot Before Destructive Operations implemented
+- `internal/cmd/destroy.go`: Added auto-snapshot before destructive destroy operation
+  - `autoSnapshotTag` generates timestamp-based tag: `pre-destroy-YYYYMMDD-HHMMSS`
+  - `--no-snapshot` flag to skip auto-snapshot for automation use cases
+  - If backend supports `Snapshotter`, creates a safety snapshot before calling Destroy
+  - Snapshot failure is non-fatal warning (destroy proceeds regardless)
+  - If backend doesn't support `Snapshotter`, destroy proceeds without snapshot
+  - `destroyResult` includes optional `snapshot_tag` field in JSON output
+  - Human output mentions safety snapshot creation
+- `internal/cmd/destroy_test.go` (19 new tests):
+  - `mockDestroySnapshotBackend` digital twin implementing Backend + Snapshotter with configurable errors
+  - Unit tests: NoSnapshotFlag, AutoSnapshot_Created, AutoSnapshot_HumanOutput, AutoSnapshot_JSONOutput, NoSnapshotFlag_SkipsSnapshot, NoSnapshotFlag_JSONOutput, SnapshotFailure_NonFatal, SnapshotFailure_JSONNoTag, NonSnapshotterBackend_NoAutoSnapshot, NonSnapshotterBackend_JSONNoTag
+  - Property tests: SnapshotterAlwaysSnapshots (5 names), NoSnapshotNeverCreates (5 names), AutoSnapshotJSONValid (5 names), NonSnapshotterJSONNoTag (3 names), SnapshotFailureNeverBlocks (3 names), SnapshotTagPrefix (10 iterations)

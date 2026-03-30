@@ -5,6 +5,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
@@ -16,6 +17,12 @@ import (
 // Overridden in tests with a digital twin.
 var removeSSHDir = ssh.RemoveSSHDir
 
+// autoSnapshotTag generates a timestamp-based snapshot tag for pre-destroy snapshots.
+// REQ-004-019
+var autoSnapshotTag = func(name string) string {
+	return fmt.Sprintf("pre-destroy-%s", time.Now().Format("20060102-150405"))
+}
+
 func init() {
 	destroyCmd := &cobra.Command{
 		Use:   "destroy <name>",
@@ -23,7 +30,9 @@ func init() {
 		Long: `Destroy a VM and all its associated resources (disk, configuration,
 snapshots). This operation is irreversible.
 
-Requires --force (-f) flag for non-interactive use.`,
+Requires --force (-f) flag for non-interactive use.
+A safety snapshot is automatically created before destruction (REQ-004-019).
+Use --no-snapshot to skip the safety snapshot.`,
 		GroupID: "vm",
 		Args:    cobra.ExactArgs(1),
 		RunE:    runDestroy,
@@ -31,12 +40,14 @@ Requires --force (-f) flag for non-interactive use.`,
 
 	// REQ-002-003: destroy flags
 	destroyCmd.Flags().BoolP("force", "f", false, "skip confirmation (required for non-interactive use)")
+	// REQ-004-019: skip auto-snapshot before destroy
+	destroyCmd.Flags().Bool("no-snapshot", false, "skip automatic safety snapshot before destruction")
 
 	rootCmd.AddCommand(destroyCmd)
 }
 
 // runDestroy executes the destroy command.
-// REQ-002-003
+// REQ-002-003, REQ-004-019
 func runDestroy(cmd *cobra.Command, args []string) error {
 	f := Formatter()
 	if f == nil {
@@ -94,6 +105,21 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-004-019: Auto-snapshot before destructive operations
+	noSnapshot, _ := cmd.Flags().GetBool("no-snapshot")
+	snapshotTag := ""
+	if !noSnapshot {
+		if s, ok := b.(backend.Snapshotter); ok {
+			snapshotTag = autoSnapshotTag(name)
+			f.Progress(fmt.Sprintf("Creating safety snapshot %q for VM %q...", snapshotTag, name))
+			if err := s.SnapshotCreate(cmd.Context(), name, snapshotTag); err != nil {
+				// Snapshot failure is a non-fatal warning; proceed with destroy
+				f.Progress(fmt.Sprintf("Warning: failed to create safety snapshot: %v", err))
+				snapshotTag = ""
+			}
+		}
+	}
+
 	f.Progress(fmt.Sprintf("Destroying VM %q...", name))
 
 	if err := b.Destroy(cmd.Context(), name); err != nil {
@@ -118,13 +144,18 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	type destroyResult struct {
-		Name string `json:"name"`
+		Name        string `json:"name"`
+		SnapshotTag string `json:"snapshot_tag,omitempty"` // REQ-004-019
 	}
 
-	result := destroyResult{Name: name}
+	result := destroyResult{Name: name, SnapshotTag: snapshotTag}
 
 	f.SuccessData(result, func() string {
-		return fmt.Sprintf("VM %q destroyed.\n", name)
+		msg := fmt.Sprintf("VM %q destroyed.", name)
+		if snapshotTag != "" {
+			msg += fmt.Sprintf(" Safety snapshot %q created.", snapshotTag)
+		}
+		return msg + "\n"
 	})
 	return nil
 }
