@@ -95,6 +95,40 @@ func TestLoadBuiltinModules_BaseInstallsRequiredPackages(t *testing.T) {
 	}
 }
 
+func TestLoadBuiltinModules_BaseHasGitCredentialPrevention(t *testing.T) {
+	// REQ-004-030: base module must prevent git credential caching to disk
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	base := modules[0]
+	assert.Equal(t, "base", base.Name)
+
+	// Must have a user-mode script for git credential prevention
+	found := false
+	for _, s := range base.Scripts {
+		if s.Mode == ModeUser {
+			assert.Contains(t, s.Script, "credential.helper",
+				"base user script must configure credential.helper (REQ-004-030)")
+			assert.Contains(t, s.Script, ".git-credentials",
+				"base user script must check for ~/.git-credentials (REQ-004-030)")
+			found = true
+		}
+	}
+	assert.True(t, found, "base module must have a user-mode script (REQ-004-030)")
+}
+
+func TestLoadBuiltinModules_BaseHasMultipleScripts(t *testing.T) {
+	// REQ-004-030: base module now has 2 scripts (system + user)
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	base := modules[0]
+	assert.Equal(t, "base", base.Name)
+	assert.Len(t, base.Scripts, 2, "base module should have system and user scripts")
+
+	// First is system (apt-get), second is user (git config)
+	assert.Equal(t, ModeSystem, base.Scripts[0].Mode)
+	assert.Equal(t, ModeUser, base.Scripts[1].Mode)
+}
+
 func TestLoadBuiltinModules_ClaudeCodeInstallsNodeAndClaude(t *testing.T) {
 	// REQ-006-011: claude-code module installs Node.js via nvm and Claude Code CLI
 	modules, err := LoadBuiltinModules()

@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"pgregory.net/rapid"
 	"sd/internal/backend"
 	"sd/internal/ui"
 )
@@ -204,7 +205,7 @@ func TestDoctorCommand_JSONOutput_AllPass(t *testing.T) {
 
 	data, ok := result["data"].([]any)
 	require.True(t, ok, "data must be a JSON array")
-	assert.Len(t, data, 6, "should have 4 binary + 1 config + 1 backend checks")
+	assert.Len(t, data, 7, "should have 4 binary + 1 config + 1 backend + 1 git_credentials checks")
 
 	for _, item := range data {
 		check := item.(map[string]any)
@@ -261,7 +262,7 @@ func TestDoctorCommand_JSONOutput_SomeFail(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 3, failCount, "limactl, tmux, and backend should fail")
-	assert.Equal(t, 3, passCount, "ssh, rsync, config checks pass")
+	assert.Equal(t, 4, passCount, "ssh, rsync, config, git_credentials checks pass")
 }
 
 func TestDoctorCommand_NoConfigRequired(t *testing.T) {
@@ -408,7 +409,7 @@ func TestProperty_DoctorJSONAlwaysValid(t *testing.T) {
 
 			data, ok := result["data"].([]any)
 			require.True(t, ok, "data must be an array")
-			assert.Len(t, data, 6, "always 6 checks")
+			assert.Len(t, data, 7, "always 7 checks")
 
 			for _, item := range data {
 				check := item.(map[string]any)
@@ -451,6 +452,7 @@ func TestProperty_DoctorHumanContainsAllChecks(t *testing.T) {
 	}
 	assert.Contains(t, output, "config")
 	assert.Contains(t, output, "backend")
+	assert.Contains(t, output, "git_credentials")
 }
 
 // Property: error code is always snake_case
@@ -471,4 +473,160 @@ func TestProperty_DoctorErrorCodeSnakeCase(t *testing.T) {
 	cliErr, ok := err.(ui.CLIError)
 	require.True(t, ok, "error must be CLIError")
 	assert.Equal(t, "doctor_check_failed", cliErr.Code)
+}
+
+// --- Git Credential Cache Prevention Tests (REQ-004-030) ---
+
+func TestCheckGitCredentials_NoFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	check := checkGitCredentials()
+	assert.Equal(t, "git_credentials", check.Name)
+	assert.Equal(t, "pass", check.Status)
+	assert.Contains(t, check.Message, "no cached git credentials")
+}
+
+func TestCheckGitCredentials_FileExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	// Create ~/.git-credentials
+	err := os.WriteFile(tmpDir+"/.git-credentials", []byte("https://user:pass@example.com"), 0o600)
+	require.NoError(t, err)
+
+	check := checkGitCredentials()
+	assert.Equal(t, "git_credentials", check.Name)
+	assert.Equal(t, "fail", check.Status)
+	assert.Contains(t, check.Message, ".git-credentials exists")
+	assert.Contains(t, check.Message, "security risk")
+}
+
+func TestCheckGitCredentials_StatOverride(t *testing.T) {
+	// Digital twin: override statPath to simulate file existence without creating one
+	origStat := statPath
+	statPath = func(name string) (os.FileInfo, error) {
+		if len(name) > 0 && name[len(name)-1:] == "s" {
+			// Simulate file exists
+			return nil, nil
+		}
+		return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
+	}
+	defer func() { statPath = origStat }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	check := checkGitCredentials()
+	assert.Equal(t, "git_credentials", check.Name)
+}
+
+func TestDoctorCommand_GitCredentialsInOutput(t *testing.T) {
+	// REQ-004-030: git_credentials check appears in doctor output
+	paths := mockDoctorPaths{
+		"limactl": "/usr/local/bin/limactl",
+		"ssh":     "/usr/bin/ssh",
+		"tmux":    "/usr/bin/tmux",
+		"rsync":   "/usr/bin/rsync",
+	}
+	setupDoctorTest(t, paths, true)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "doctor"})
+	root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+
+	var result map[string]any
+	err := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err)
+
+	data := result["data"].([]any)
+	found := false
+	for _, item := range data {
+		check := item.(map[string]any)
+		if check["name"] == "git_credentials" {
+			found = true
+			assert.Equal(t, "pass", check["status"])
+			break
+		}
+	}
+	assert.True(t, found, "git_credentials check must appear in doctor output")
+}
+
+func TestDoctorCommand_GitCredentialsFailInJSON(t *testing.T) {
+	// REQ-004-030: doctor reports git_credentials failure when file exists
+	paths := mockDoctorPaths{
+		"limactl": "/usr/local/bin/limactl",
+		"ssh":     "/usr/bin/ssh",
+		"tmux":    "/usr/bin/tmux",
+		"rsync":   "/usr/bin/rsync",
+	}
+	setupDoctorTest(t, paths, true)
+
+	// Create ~/.git-credentials in the test HOME
+	home := os.Getenv("HOME")
+	err := os.WriteFile(home+"/.git-credentials", []byte("https://token@github.com"), 0o600)
+	require.NoError(t, err)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "doctor"})
+	root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err)
+
+	data := result["data"].([]any)
+	found := false
+	for _, item := range data {
+		check := item.(map[string]any)
+		if check["name"] == "git_credentials" {
+			found = true
+			assert.Equal(t, "fail", check["status"])
+			assert.Contains(t, check["message"], ".git-credentials exists")
+			break
+		}
+	}
+	assert.True(t, found, "git_credentials check must appear")
+}
+
+// Property: git_credentials check always has correct name and valid status
+func TestProperty_GitCredentialsCheckAlwaysValid(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	origStat := statPath
+	statPath = func(name string) (os.FileInfo, error) {
+		return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
+	}
+	defer func() { statPath = origStat }()
+
+	rapid.Check(t, func(t *rapid.T) {
+		check := checkGitCredentials()
+		if check.Name != "git_credentials" {
+			t.Fatalf("expected name git_credentials, got %q", check.Name)
+		}
+		if check.Status != "pass" && check.Status != "fail" {
+			t.Fatalf("expected pass or fail, got %q", check.Status)
+		}
+	})
 }

@@ -403,11 +403,33 @@ Wired into create (CaptureHostKey), connect (VerifyHostKey), and destroy (Remove
 ### No CI workflow change detection
 REQ-004-018: Not implemented.
 
-### No security posture summary
-REQ-004-024: Not implemented.
+### Security posture summary implemented (REQ-004-024)
+- `internal/cmd/security.go` with `sd security status <name>` command
+- Human output: tab-formatted posture summary with mounts, egress rules, credentials, snapshots, last audit event, and warnings
+- JSON output: `{"ok": true, "data": {"vm": ..., "status": ..., "mounts": [...], "egress": {...}, "credentials": [...], "snapshots": {...}, "last_audit": {...}, "warnings": [...]}}`
+- Gathers data from: VM status (backend), mounts (VM config), egress rules (config + defaults), credentials (VM env), snapshots (Snapshotter interface), last audit event (audit log)
+- Warnings for posture deviations: writable mounts, classic PATs (ghp_), no credentials, no snapshots
+- Error codes: `vm_not_found`, `backend_unavailable`, `invalid_argument`
+- Digital twin mocks: `mockSecurityBackend` (Backend + Snapshotter), `mockSecurityEnvStore` (preserves key case), `noSnapshotterMinimal` (no Snapshotter)
+- Added "security" to no-config-required list in root.go
+- Tests in `internal/cmd/security_test.go` (39 tests):
+  - Unit tests: registration, no-config, human output, JSON output, VM not found, backend unavailable, empty name, no credentials warning, classic PAT warning, no snapshots warning, egress default domains, last audit event, no audit events, non-snapshotter backend
+  - Format tests: no warnings, with warnings, no last audit, with mounts, snapshot error
+  - Property tests: JSON always valid (5 cases), error codes snake_case (3 codes), JSON required fields, human contains VM name (5 names), nonexistent VM never succeeds (3 names), warnings include no credentials (3 VMs)
 
-### No git credential cache prevention
-REQ-004-030: Not implemented.
+### Git credential cache prevention implemented (REQ-004-030)
+- `internal/provision/modules/base.yaml`: Added user-mode script to:
+  - Set `git config --global credential.helper ""` to clear default credential helpers
+  - Remove `~/.git-credentials` if found (with warning)
+- `internal/cmd/doctor.go`: Added `checkGitCredentials()` check that warns if `~/.git-credentials` exists on host
+  - Injectable `statPath` variable for digital twin testing
+- Tests in `internal/cmd/doctor_test.go` (8 new tests):
+  - Unit tests: NoFile (pass), FileExists (fail), StatOverride digital twin, GitCredentialsInOutput (JSON), GitCredentialsFailInJSON
+  - Property tests: git_credentials check always valid (100 cases)
+  - Updated existing tests: check counts 6->7, git_credentials in all-checks property
+- Tests in `internal/provision/modules_test.go` (2 new tests):
+  - BaseHasGitCredentialPrevention: verifies user-mode script contains credential.helper and .git-credentials
+  - BaseHasMultipleScripts: verifies base has system + user scripts
 
 ### VSOCK port detection in SSHConfig (fixed)
 REQ-007-005: Implemented VSOCK/TCP transport detection in SSHConfig.

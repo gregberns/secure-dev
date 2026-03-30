@@ -14,6 +14,14 @@ scripts:
         tmux \
         vim
       rm -rf /var/lib/apt/lists/*
+  - mode: user
+    script: |
+      # REQ-004-030: Prevent git credential caching to disk
+      git config --global credential.helper ""
+      if [ -f ~/.git-credentials ]; then
+        echo "WARNING: ~/.git-credentials found, removing" >&2
+        rm -f ~/.git-credentials
+      fi
 probe:
   command: "command -v git && command -v curl && command -v jq && command -v tmux"
   interval: 5s
