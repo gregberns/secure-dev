@@ -1,0 +1,1047 @@
+// Package cmd provides tests for the diff command.
+// REQ-004-018: CI Workflow Change Detection
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"sd/internal/backend"
+	"sd/internal/ui"
+)
+
+// ---------------------------------------------------------------------------
+// Digital Twins
+// ---------------------------------------------------------------------------
+
+// mockDiffBackend is a digital twin of a backend for diff command testing.
+// It implements backend.Backend with configurable Exec behavior.
+type mockDiffBackend struct {
+	name      string
+	available bool
+	statusMap map[string]backend.VMStatus
+	statusErr error
+	// execResponses maps command substrings to results.
+	// The first matching key is returned.
+	execResponses map[string]backend.ExecResult
+	execErr       error
+	// Records all Exec calls
+	diffExecCalls []diffExecCall
+}
+
+type diffExecCall struct {
+	VMName  string
+	Command []string
+}
+
+func (m *mockDiffBackend) Name() string { return m.name }
+func (m *mockDiffBackend) Available() error {
+	if m.available {
+		return nil
+	}
+	return fmt.Errorf("backend not available")
+}
+func (m *mockDiffBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
+	return nil
+}
+func (m *mockDiffBackend) Start(_ context.Context, _ string) error    { return nil }
+func (m *mockDiffBackend) Stop(_ context.Context, _ string) error     { return nil }
+func (m *mockDiffBackend) Destroy(_ context.Context, _ string) error  { return nil }
+func (m *mockDiffBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
+	return backend.SSHConfig{}, nil
+}
+func (m *mockDiffBackend) List(_ context.Context) ([]backend.VMInfo, error) {
+	return nil, nil
+}
+func (m *mockDiffBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
+	if m.statusErr != nil {
+		return "", m.statusErr
+	}
+	if s, ok := m.statusMap[name]; ok {
+		return s, nil
+	}
+	return "", backend.ErrVMNotFound
+}
+func (m *mockDiffBackend) Exec(_ context.Context, name string, command []string) (backend.ExecResult, error) {
+	if m.execErr != nil {
+		return backend.ExecResult{}, m.execErr
+	}
+	m.diffExecCalls = append(m.diffExecCalls, diffExecCall{VMName: name, Command: command})
+
+	// Match by command string
+	cmdStr := strings.Join(command, " ")
+	for key, result := range m.execResponses {
+		if strings.Contains(cmdStr, key) {
+			return result, nil
+		}
+	}
+
+	return backend.ExecResult{ExitCode: 0, Stdout: ""}, nil
+}
+
+// setupDiffTest configures the test environment with a mock backend.
+func setupDiffTest(t *testing.T, mb *mockDiffBackend) {
+	t.Helper()
+	newRootTestEnv(t)
+
+	origGetBackend := getBackendFunc
+	getBackendFunc = func(name string) (backend.Backend, error) {
+		return mb, nil
+	}
+	t.Cleanup(func() { getBackendFunc = origGetBackend })
+}
+
+// helper to build a standard diff mock backend
+func newDiffMock(gitStatus string, hooksOutput string) *mockDiffBackend {
+	return &mockDiffBackend{
+		name:      "mock-diff",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"test-vm": backend.StatusRunning},
+		execResponses: map[string]backend.ExecResult{
+			"git status --porcelain": {ExitCode: 0, Stdout: "true\n" + gitStatus},
+			"git rev-parse --git-dir": {ExitCode: 0, Stdout: ".git\n" + hooksOutput},
+		},
+	}
+}
+
+// --- Unit tests: Registration ---
+
+func TestDiffCommand_Registered(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+
+	found := false
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "diff" {
+			found = true
+			assert.Equal(t, "security", cmd.GroupID)
+			break
+		}
+	}
+	assert.True(t, found, "diff command must be registered")
+}
+
+func TestDiffCommand_NoConfigRequired(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+
+	diffCmd, _, err := root.Find([]string{"diff"})
+	require.NoError(t, err)
+	assert.Equal(t, "security", diffCmd.GroupID)
+}
+
+func TestDiffCommand_ExactArgs(t *testing.T) {
+	mb := newDiffMock("", "")
+	setupDiffTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "diff", "test-vm"})
+	err := root.Execute()
+	require.NoError(t, err)
+}
+
+func TestDiffCommand_MissingName(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+
+	root.SetArgs([]string{"diff"})
+	err := root.Execute()
+	assert.Error(t, err, "diff without args must fail")
+}
+
+// --- Unit tests: Human output ---
+
+func TestDiffCommand_HumanOutput_NoChanges(t *testing.T) {
+	mb := newDiffMock("", "")
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "No changes detected")
+	assert.Contains(t, buf.String(), "test-vm")
+}
+
+func TestDiffCommand_HumanOutput_WithCIChanges(t *testing.T) {
+	gitStatus := "M .github/workflows/build.yml\nA .gitlab-ci.yml\nM src/main.go"
+	mb := newDiffMock(gitStatus, "")
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+	output := buf.String()
+	assert.Contains(t, output, ".github/workflows/build.yml")
+	assert.Contains(t, output, ".gitlab-ci.yml")
+	assert.Contains(t, output, "src/main.go")
+	assert.Contains(t, output, "Warnings")
+	assert.Contains(t, output, ".github/workflows/")
+	assert.Contains(t, output, ".gitlab-ci.yml")
+}
+
+func TestDiffCommand_HumanOutput_NoCIChanges(t *testing.T) {
+	gitStatus := "M src/main.go\nA README.md"
+	mb := newDiffMock(gitStatus, "")
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+	output := buf.String()
+	assert.Contains(t, output, "src/main.go")
+	assert.Contains(t, output, "README.md")
+	assert.NotContains(t, output, "Warnings")
+}
+
+// --- Unit tests: JSON output ---
+
+func TestDiffCommand_JSONOutput_NoChanges(t *testing.T) {
+	mb := newDiffMock("", "")
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+
+	var result map[string]any
+	jsonErr := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, jsonErr)
+	assert.True(t, result["ok"].(bool))
+
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "test-vm", data["vm"])
+	changes := data["changes"].([]any)
+	assert.Empty(t, changes)
+	warnings := data["warnings"].([]any)
+	assert.Empty(t, warnings)
+}
+
+func TestDiffCommand_JSONOutput_WithCIChanges(t *testing.T) {
+	gitStatus := "M .github/workflows/ci.yml\n?? Jenkinsfile"
+	mb := newDiffMock(gitStatus, "")
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+
+	var result map[string]any
+	jsonErr := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, jsonErr)
+
+	data := result["data"].(map[string]any)
+	changes := data["changes"].([]any)
+	assert.Len(t, changes, 2)
+
+	warnings := data["warnings"].([]any)
+	assert.Len(t, warnings, 2)
+
+	// Verify each warning has the expected fields
+	for _, w := range warnings {
+		entry := w.(map[string]any)
+		assert.True(t, entry["warning"].(bool))
+		assert.NotEmpty(t, entry["category"])
+	}
+}
+
+func TestDiffCommand_JSONOutput_MixedChanges(t *testing.T) {
+	gitStatus := "M .github/workflows/test.yml\nM src/app.go\nD README.md"
+	mb := newDiffMock(gitStatus, "")
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+
+	var result map[string]any
+	jsonErr := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, jsonErr)
+
+	data := result["data"].(map[string]any)
+	changes := data["changes"].([]any)
+	assert.Len(t, changes, 3)
+
+	warnings := data["warnings"].([]any)
+	assert.Len(t, warnings, 1)
+}
+
+// --- Unit tests: Error handling ---
+
+func TestDiffCommand_VMNotFound(t *testing.T) {
+	mb := &mockDiffBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{},
+	}
+	setupDiffTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "nonexistent"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "vm_not_found", cliErr.Code)
+}
+
+func TestDiffCommand_VMNotRunning(t *testing.T) {
+	mb := &mockDiffBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"stopped-vm": backend.StatusStopped},
+	}
+	setupDiffTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "stopped-vm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "vm_not_running", cliErr.Code)
+}
+
+func TestDiffCommand_BackendUnavailable(t *testing.T) {
+	newRootTestEnv(t)
+	origGetBackend := getBackendFunc
+	getBackendFunc = func(name string) (backend.Backend, error) {
+		return nil, fmt.Errorf("no such backend")
+	}
+	t.Cleanup(func() { getBackendFunc = origGetBackend })
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "myvm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "backend_unavailable", cliErr.Code)
+}
+
+func TestDiffCommand_BackendNotAvailable(t *testing.T) {
+	mb := &mockDiffBackend{name: "mock", available: false}
+	setupDiffTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "myvm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "backend_unavailable", cliErr.Code)
+}
+
+func TestDiffCommand_ExecError(t *testing.T) {
+	mb := &mockDiffBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"test-vm": backend.StatusRunning},
+		execErr:   fmt.Errorf("ssh connection refused"),
+	}
+	setupDiffTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "test-vm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "diff_failed", cliErr.Code)
+}
+
+func TestDiffCommand_ExecErrVMNotRunning(t *testing.T) {
+	mb := &mockDiffBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"test-vm": backend.StatusRunning},
+		execErr:   backend.ErrVMNotRunning,
+	}
+	setupDiffTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "test-vm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "vm_not_running", cliErr.Code)
+}
+
+func TestDiffCommand_EmptyName(t *testing.T) {
+	mb := &mockDiffBackend{name: "mock", available: true}
+	setupDiffTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", ""})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "invalid_argument", cliErr.Code)
+}
+
+func TestDiffCommand_StatusCheckError(t *testing.T) {
+	mb := &mockDiffBackend{
+		name:      "mock",
+		available: true,
+		statusErr: fmt.Errorf("connection refused"),
+		statusMap: map[string]backend.VMStatus{},
+	}
+	setupDiffTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"diff", "test-vm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "diff_failed", cliErr.Code)
+}
+
+// --- Unit tests: Git hooks detection ---
+
+func TestDiffCommand_HooksDetection(t *testing.T) {
+	gitStatus := "M src/main.go"
+	hooksOutput := "pre-commit\ncommit-msg\napplypatch-msg.sample"
+	mb := newDiffMock(gitStatus, hooksOutput)
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+
+	var result map[string]any
+	jsonErr := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, jsonErr)
+
+	data := result["data"].(map[string]any)
+	changes := data["changes"].([]any)
+
+	// Should have: src/main.go, .git/hooks/pre-commit, .git/hooks/commit-msg
+	// (.sample files are filtered out)
+	foundPreCommit := false
+	foundCommitMsg := false
+	for _, c := range changes {
+		entry := c.(map[string]any)
+		path := entry["path"].(string)
+		if path == ".git/hooks/pre-commit" {
+			foundPreCommit = true
+			assert.True(t, entry["warning"].(bool))
+		}
+		if path == ".git/hooks/commit-msg" {
+			foundCommitMsg = true
+			assert.True(t, entry["warning"].(bool))
+		}
+	}
+	assert.True(t, foundPreCommit, "should detect pre-commit hook")
+	assert.True(t, foundCommitMsg, "should detect commit-msg hook")
+}
+
+func TestDiffCommand_HooksNotDuplicated(t *testing.T) {
+	// If a hook already appears in git status, it shouldn't be added again
+	gitStatus := "M .git/hooks/pre-commit\nM src/main.go"
+	hooksOutput := "pre-commit"
+	mb := newDiffMock(gitStatus, hooksOutput)
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+
+	var result map[string]any
+	jsonErr := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, jsonErr)
+
+	data := result["data"].(map[string]any)
+	changes := data["changes"].([]any)
+
+	// Count occurrences of .git/hooks/pre-commit
+	count := 0
+	for _, c := range changes {
+		entry := c.(map[string]any)
+		if entry["path"] == ".git/hooks/pre-commit" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "hook should appear exactly once, not duplicated")
+}
+
+// --- Unit tests: parseGitStatus ---
+
+func TestParseGitStatus_Basic(t *testing.T) {
+	entries := parseGitStatus("true\nM file.go\nA new.go\n?? untracked.txt")
+	require.Len(t, entries, 3)
+	assert.Equal(t, "file.go", entries[0].Path)
+	assert.Equal(t, "modified", entries[0].Status)
+	assert.Equal(t, "new.go", entries[1].Path)
+	assert.Equal(t, "added", entries[1].Status)
+	assert.Equal(t, "untracked.txt", entries[2].Path)
+	assert.Equal(t, "untracked", entries[2].Status)
+}
+
+func TestParseGitStatus_Empty(t *testing.T) {
+	entries := parseGitStatus("")
+	assert.Nil(t, entries)
+}
+
+func TestParseGitStatus_Rename(t *testing.T) {
+	entries := parseGitStatus("R  old.go -> new.go")
+	require.Len(t, entries, 1)
+	assert.Equal(t, "new.go", entries[0].Path)
+	assert.Equal(t, "renamed", entries[0].Status)
+}
+
+func TestParseGitStatus_Deleted(t *testing.T) {
+	entries := parseGitStatus("D removed.go")
+	require.Len(t, entries, 1)
+	assert.Equal(t, "removed.go", entries[0].Path)
+	assert.Equal(t, "deleted", entries[0].Status)
+}
+
+// --- Unit tests: isCICDPath ---
+
+func TestIsCICDPath(t *testing.T) {
+	tests := []struct {
+		path      string
+		isWarning bool
+		category  string
+	}{
+		{".github/workflows/build.yml", true, ".github/workflows/"},
+		{".github/workflows/ci.yaml", true, ".github/workflows/"},
+		{".gitlab-ci.yml", true, ".gitlab-ci.yml"},
+		{"Jenkinsfile", true, "Jenkinsfile"},
+		{".circleci/config.yml", true, ".circleci/"},
+		{".git/hooks/pre-commit", true, ".git/hooks/"},
+		{"src/main.go", false, ""},
+		{"README.md", false, ""},
+		{"go.mod", false, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			warning, category := isCICDPath(tc.path)
+			assert.Equal(t, tc.isWarning, warning)
+			assert.Equal(t, tc.category, category)
+		})
+	}
+}
+
+// --- Unit tests: gitStatusToLabel ---
+
+func TestGitStatusToLabel(t *testing.T) {
+	tests := []struct {
+		xy     string
+		label  string
+	}{
+		{"??", "untracked"},
+		{"A ", "added"},
+		{" M", "modified"},
+		{"M ", "modified"},
+		{"D ", "deleted"},
+		{" D", "deleted"},
+		{"R ", "renamed"},
+		{"C ", "copied"},
+		{"AM", "added"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.xy, func(t *testing.T) {
+			assert.Equal(t, tc.label, gitStatusToLabel(tc.xy))
+		})
+	}
+}
+
+// --- Unit tests: formatDiffOutput ---
+
+func TestFormatDiffOutput_NoChanges(t *testing.T) {
+	data := diffResult{VM: "myvm", Changes: []diffEntry{}, Warnings: []diffEntry{}}
+	output := formatDiffOutput(data)
+	assert.Contains(t, output, "No changes detected")
+}
+
+func TestFormatDiffOutput_WithChanges(t *testing.T) {
+	data := diffResult{
+		VM: "myvm",
+		Changes: []diffEntry{
+			{Path: "src/main.go", Status: "modified"},
+			{Path: ".github/workflows/build.yml", Status: "modified", Warning: true, Category: ".github/workflows/"},
+		},
+		Warnings: []diffEntry{
+			{Path: ".github/workflows/build.yml", Status: "modified", Warning: true, Category: ".github/workflows/"},
+		},
+	}
+	output := formatDiffOutput(data)
+	assert.Contains(t, output, "src/main.go")
+	assert.Contains(t, output, ".github/workflows/build.yml")
+	assert.Contains(t, output, "Warnings")
+	assert.Contains(t, output, ".github/workflows/")
+}
+
+func TestFormatDiffOutput_OnlyChangesNoWarnings(t *testing.T) {
+	data := diffResult{
+		VM: "myvm",
+		Changes: []diffEntry{
+			{Path: "src/main.go", Status: "modified"},
+		},
+		Warnings: []diffEntry{},
+	}
+	output := formatDiffOutput(data)
+	assert.Contains(t, output, "src/main.go")
+	assert.NotContains(t, output, "Warnings")
+}
+
+// --- Property tests ---
+
+func TestProperty_DiffJSONAlwaysValid(t *testing.T) {
+	cases := []struct {
+		name       string
+		vmName     string
+		gitStatus  string
+		hooks      string
+	}{
+		{"no_changes", "vm1", "", ""},
+		{"ci_changes", "vm2", "M .github/workflows/ci.yml", ""},
+		{"mixed_changes", "vm3", "M src/app.go\nA README.md", ""},
+		{"hooks_only", "vm4", "", "pre-commit"},
+		{"all_types", "vm5", "M .gitlab-ci.yml\n?? new.go\nD old.go", "commit-msg"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mb := newDiffMock(tc.gitStatus, tc.hooks)
+			mb.statusMap[tc.vmName] = backend.StatusRunning
+			setupDiffTest(t, mb)
+
+			oldStdout := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			root := RootCmd()
+			root.SetArgs([]string{"--json", "diff", tc.vmName})
+			err := root.Execute()
+
+			w.Close()
+			os.Stdout = oldStdout
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+
+			require.NoError(t, err)
+
+			var result map[string]any
+			jsonErr := json.Unmarshal(buf.Bytes(), &result)
+			require.NoError(t, jsonErr, "JSON must parse for %s: %s", tc.name, buf.String())
+			assert.True(t, result["ok"].(bool), "ok must be true for %s", tc.name)
+
+			data := result["data"].(map[string]any)
+			assert.Equal(t, tc.vmName, data["vm"])
+			assert.NotNil(t, data["changes"])
+			assert.NotNil(t, data["warnings"])
+		})
+	}
+}
+
+func TestProperty_DiffErrorCodesSnakeCase(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		setupFn    func(t *testing.T)
+		wantCode   string
+	}{
+		{
+			"vm_not_found",
+			[]string{"diff", "missing"},
+			func(t *testing.T) {
+				mb := &mockDiffBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+				setupDiffTest(t, mb)
+			},
+			"vm_not_found",
+		},
+		{
+			"vm_not_running",
+			[]string{"diff", "stopped"},
+			func(t *testing.T) {
+				mb := &mockDiffBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{"stopped": backend.StatusStopped}}
+				setupDiffTest(t, mb)
+			},
+			"vm_not_running",
+		},
+		{
+			"invalid_argument",
+			[]string{"diff", ""},
+			func(t *testing.T) {
+				mb := &mockDiffBackend{name: "mock", available: true}
+				setupDiffTest(t, mb)
+			},
+			"invalid_argument",
+		},
+		{
+			"backend_unavailable",
+			[]string{"diff", "vm1"},
+			func(t *testing.T) {
+				mb := &mockDiffBackend{name: "mock", available: false}
+				setupDiffTest(t, mb)
+			},
+			"backend_unavailable",
+		},
+		{
+			"diff_failed_on_status_err",
+			[]string{"diff", "vm1"},
+			func(t *testing.T) {
+				mb := &mockDiffBackend{name: "mock", available: true, statusErr: fmt.Errorf("fail")}
+				setupDiffTest(t, mb)
+			},
+			"diff_failed",
+		},
+		{
+			"diff_failed_on_exec_err",
+			[]string{"diff", "vm1"},
+			func(t *testing.T) {
+				mb := &mockDiffBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{"vm1": backend.StatusRunning}, execErr: fmt.Errorf("fail")}
+				setupDiffTest(t, mb)
+			},
+			"diff_failed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setupFn(t)
+
+			root := RootCmd()
+			root.SetArgs(tc.args)
+			err := root.Execute()
+
+			require.Error(t, err)
+			cliErr, ok := err.(ui.CLIError)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantCode, cliErr.Code)
+			// Verify snake_case: only lowercase, underscores, no spaces
+			assert.NotContains(t, cliErr.Code, " ")
+			assert.Equal(t, strings.ToLower(cliErr.Code), cliErr.Code)
+		})
+	}
+}
+
+func TestProperty_DiffHumanContainsVMName(t *testing.T) {
+	vmNames := []string{"my-vm", "prod-server", "dev-box", "test", "vm-with-long-name"}
+	for _, vmName := range vmNames {
+		t.Run(vmName, func(t *testing.T) {
+			mb := &mockDiffBackend{
+				name:      "mock",
+				available: true,
+				statusMap: map[string]backend.VMStatus{vmName: backend.StatusRunning},
+				execResponses: map[string]backend.ExecResult{
+					"git status": {ExitCode: 0, Stdout: "true\n"},
+					"git rev-parse": {ExitCode: 0, Stdout: ""},
+				},
+			}
+			setupDiffTest(t, mb)
+
+			oldStdout := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			root := RootCmd()
+			root.SetArgs([]string{"diff", vmName})
+			err := root.Execute()
+
+			w.Close()
+			os.Stdout = oldStdout
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+
+			require.NoError(t, err)
+			assert.Contains(t, buf.String(), vmName)
+		})
+	}
+}
+
+func TestProperty_DiffNonexistentVMNeverCallsExec(t *testing.T) {
+	vmNames := []string{"ghost", "phantom", "missing"}
+	for _, vmName := range vmNames {
+		t.Run(vmName, func(t *testing.T) {
+			mb := &mockDiffBackend{
+				name:      "mock",
+				available: true,
+				statusMap: map[string]backend.VMStatus{},
+			}
+			setupDiffTest(t, mb)
+
+			root := RootCmd()
+			root.SetArgs([]string{"diff", vmName})
+			err := root.Execute()
+
+			require.Error(t, err)
+			assert.Empty(t, mb.diffExecCalls, "exec should never be called for nonexistent VM")
+		})
+	}
+}
+
+func TestProperty_DiffJSONRequiredFields(t *testing.T) {
+	gitStatus := "M .github/workflows/test.yml\nA src/main.go"
+	mb := newDiffMock(gitStatus, "pre-commit")
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+
+	var result map[string]any
+	jsonErr := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, jsonErr)
+
+	data := result["data"].(map[string]any)
+	assert.Contains(t, data, "vm")
+	assert.Contains(t, data, "changes")
+	assert.Contains(t, data, "warnings")
+
+	// Each change entry has required fields
+	for _, c := range data["changes"].([]any) {
+		entry := c.(map[string]any)
+		assert.Contains(t, entry, "path")
+		assert.Contains(t, entry, "status")
+		assert.Contains(t, entry, "warning")
+	}
+}
+
+func TestProperty_DiffStoppedVMNeverCallsExec(t *testing.T) {
+	statuses := []backend.VMStatus{backend.StatusStopped, backend.StatusError, backend.StatusCreating}
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			mb := &mockDiffBackend{
+				name:      "mock",
+				available: true,
+				statusMap: map[string]backend.VMStatus{"vm1": status},
+			}
+			setupDiffTest(t, mb)
+
+			root := RootCmd()
+			root.SetArgs([]string{"diff", "vm1"})
+			err := root.Execute()
+
+			require.Error(t, err)
+			assert.Empty(t, mb.diffExecCalls, "exec should not be called for non-running VM")
+		})
+	}
+}
+
+func TestProperty_DiffAllCICDPatternsDetected(t *testing.T) {
+	// Every defined CI/CD pattern should be detected
+	for _, pattern := range cicdPatterns {
+		t.Run(pattern, func(t *testing.T) {
+			var testPath string
+			if strings.HasSuffix(pattern, "/") {
+				testPath = pattern + "test-file"
+			} else {
+				testPath = pattern
+			}
+			warning, category := isCICDPath(testPath)
+			assert.True(t, warning, "path %q should match CI/CD pattern %q", testPath, pattern)
+			assert.Equal(t, pattern, category)
+		})
+	}
+}
+
+func TestProperty_DiffCICDWarningAlwaysHasCategory(t *testing.T) {
+	// Generate git status output with all CI/CD patterns
+	var statusLines []string
+	for _, pattern := range cicdPatterns {
+		if strings.HasSuffix(pattern, "/") {
+			statusLines = append(statusLines, fmt.Sprintf("M %stest.yml", pattern))
+		} else {
+			statusLines = append(statusLines, fmt.Sprintf("M %s", pattern))
+		}
+	}
+	gitStatus := strings.Join(statusLines, "\n")
+	mb := newDiffMock(gitStatus, "")
+	setupDiffTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "diff", "test-vm"})
+	err := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, err)
+
+	var result map[string]any
+	jsonErr := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, jsonErr)
+
+	data := result["data"].(map[string]any)
+	warnings := data["warnings"].([]any)
+	assert.Equal(t, len(cicdPatterns), len(warnings), "all CI/CD patterns should generate warnings")
+
+	for _, w := range warnings {
+		entry := w.(map[string]any)
+		assert.True(t, entry["warning"].(bool))
+		assert.NotEmpty(t, entry["category"].(string), "warning must have a category")
+	}
+}
+
+// --- Property: error JSON format ---
+
+// Property: error codes are consistent regardless of JSON mode
+func TestProperty_DiffErrorCodesConsistent(t *testing.T) {
+	vmNames := []string{"a", "b", "c"}
+	for _, vmName := range vmNames {
+		t.Run(vmName, func(t *testing.T) {
+			// Both JSON and human mode should produce the same error code
+			for _, jsonFlag := range []bool{false, true} {
+				name := "human"
+				if jsonFlag {
+					name = "json"
+				}
+				t.Run(name, func(t *testing.T) {
+					mb := &mockDiffBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+					setupDiffTest(t, mb)
+
+					args := []string{"diff", vmName}
+					if jsonFlag {
+						args = append([]string{"--json"}, args...)
+					}
+
+					root := RootCmd()
+					root.SetArgs(args)
+					err := root.Execute()
+
+					require.Error(t, err)
+					cliErr, ok := err.(ui.CLIError)
+					require.True(t, ok)
+					assert.Equal(t, "vm_not_found", cliErr.Code)
+				})
+			}
+		})
+	}
+}

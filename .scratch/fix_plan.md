@@ -400,8 +400,25 @@ Wired into create (CaptureHostKey), connect (VerifyHostKey), and destroy (Remove
   - Property tests: bash always produces output, zsh always produces output, fish always produces output, invalid shell always fails, error codes snake_case (6 subtests), bash script contains "sd", module names always complete (NoFileComp + non-empty), VM names match list (4 sets), snapshot tags match list (3 sets), backend unavailable returns NoFileComp
   - Digital twins: mockCompletionBackend (Backend + Snapshotter), mockNonSnapshotterCompletionBackend (Backend only)
 
-### No CI workflow change detection
-REQ-004-018: Not implemented.
+### CI Workflow Change Detection implemented (REQ-004-018)
+- `internal/cmd/diff.go` with `sd diff <name>` command
+- Human output: lists all changed files, flags CI/CD and git hook changes with warnings
+- JSON output: `{"ok": true, "data": {"vm": ..., "changes": [...], "warnings": [...]}}`
+- Runs `git status --porcelain` and `git rev-parse --git-dir` inside the VM via backend.Exec
+- CI/CD patterns detected: `.github/workflows/*`, `.gitlab-ci.yml`, `Jenkinsfile`, `.circleci/*`, `.git/hooks/*`
+- Detects non-sample git hooks present in the VM
+- Deduplicates hook entries between git status and hook listing
+- Error codes: `vm_not_found`, `vm_not_running`, `backend_unavailable`, `diff_failed`, `invalid_argument`
+- Digital twin mock backend (`mockDiffBackend`) with configurable exec responses and status map
+- Tests in `internal/cmd/diff_test.go` (42 tests):
+  - Unit tests: registration, group ID, no-config, exact args, missing name
+  - Human output: no changes, with CI changes, no CI changes
+  - JSON output: no changes, with CI changes, mixed changes
+  - Error handling: VM not found, VM not running, backend unavailable, backend not available, exec error, exec ErrVMNotRunning, empty name, status check error
+  - Hooks detection: detects non-sample hooks, no duplication with git status
+  - Helper unit tests: parseGitStatus (basic, empty, rename, deleted), isCICDPath (10 patterns), gitStatusToLabel (9 codes), formatDiffOutput (no changes, with changes and warnings, only changes)
+  - Property tests: JSON always valid (5 cases), error codes snake_case (6 codes), human contains VM name (5 names), nonexistent VM never calls exec (3 names), JSON required fields, stopped VM never calls exec (3 statuses), all CI/CD patterns detected (5 patterns), CI/CD warning always has category, error codes consistent across modes (3 names x 2 modes)
+- Added "diff" to no-config-required list in root.go
 
 ### Security posture summary implemented (REQ-004-024)
 - `internal/cmd/security.go` with `sd security status <name>` command
