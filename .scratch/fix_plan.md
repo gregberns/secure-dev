@@ -149,6 +149,16 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
   - Digital twin: `mockProvisionBackend` recording Exec calls with configurable results/errors
   - `captureStdout` helper using `os.Pipe()` for stdout capture
 
+### Mount path validation wired into create command (REQ-004-005)
+- `internal/cmd/create.go`: Added `security.ValidateMountPath` call for each mount spec before creating VM
+  - Validates mount paths against sensitive directories ($HOME, ~/.ssh, ~/.aws, ~/.config, ~/.gnupg, ~/.kube, ~/.docker, browser profiles, docker socket)
+  - Resolves symlinks before checking
+  - Rejects .env files at mount root
+  - Error code: `mount_path_rejected` with actionable message
+- Tests in `internal/cmd/create_test.go` (12 new tests):
+  - Unit tests: SSHDir rejected, HomeDir rejected, DockerSocket rejected, safe path succeeds, JSON mode, multiple mounts (first sensitive)
+  - Property tests: all sensitive paths always rejected (7 paths x 2 modes), sensitive mount never reaches backend (5 paths)
+
 Still missing: security status, diff.
 
 ### VM name validation implemented (REQ-001-006)

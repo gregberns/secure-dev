@@ -759,3 +759,174 @@ func TestProperty_Create_TCP_AlwaysCapturesHostKey(t *testing.T) {
 		})
 	}
 }
+
+// --- REQ-004-005: Mount path validation in create ---
+
+func TestCreateCommand_MountSensitivePath_SSHDir(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	mb := &mockCreateBackend{name: "mock", available: true}
+	setupCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--mount", homeDir + "/.ssh:/keys"})
+	err = root.Execute()
+
+	require.Error(t, err, "mounting ~/.ssh must be rejected")
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "mount_path_rejected", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "sensitive")
+	assert.Empty(t, mb.created, "backend Create must not be called")
+}
+
+func TestCreateCommand_MountSensitivePath_HomeDir(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	mb := &mockCreateBackend{name: "mock", available: true}
+	setupCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--mount", homeDir + ":/home"})
+	err = root.Execute()
+
+	require.Error(t, err, "mounting $HOME must be rejected")
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "mount_path_rejected", cliErr.Code)
+	assert.Empty(t, mb.created, "backend Create must not be called")
+}
+
+func TestCreateCommand_MountSensitivePath_DockerSocket(t *testing.T) {
+	mb := &mockCreateBackend{name: "mock", available: true}
+	setupCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--mount", "/var/run/docker.sock:/var/run/docker.sock"})
+	err := root.Execute()
+
+	require.Error(t, err, "mounting docker socket must be rejected")
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "mount_path_rejected", cliErr.Code)
+	assert.Empty(t, mb.created, "backend Create must not be called")
+}
+
+func TestCreateCommand_MountSafePath_Succeeds(t *testing.T) {
+	mb := &mockCreateBackend{name: "mock", available: true}
+	setupCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--mount", "/opt/workspace:/workspace"})
+	err := root.Execute()
+
+	require.NoError(t, err, "non-sensitive mount path must be accepted")
+	require.Len(t, mb.created, 1)
+}
+
+func TestCreateCommand_MountSensitivePath_JSON(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	mb := &mockCreateBackend{name: "mock", available: true}
+	setupCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "create", "testvm", "--mount", homeDir + "/.ssh:/keys"})
+	execErr := root.Execute()
+
+	require.Error(t, execErr)
+	cliErr, ok := execErr.(ui.CLIError)
+	require.True(t, ok, "error must be CLIError in JSON mode")
+	assert.Equal(t, "mount_path_rejected", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "sensitive")
+	assert.Empty(t, mb.created, "backend Create must not be called")
+}
+
+func TestCreateCommand_MultipleMounts_FirstSensitive(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	mb := &mockCreateBackend{name: "mock", available: true}
+	setupCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{
+		"create", "testvm",
+		"--mount", homeDir + "/.aws:/aws",
+		"--mount", "/opt/code:/code",
+	})
+	err = root.Execute()
+
+	require.Error(t, err, "any sensitive mount must fail the whole command")
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "mount_path_rejected", cliErr.Code)
+	assert.Empty(t, mb.created, "backend Create must not be called when any mount is sensitive")
+}
+
+// Property: sensitive mount paths are always rejected regardless of mount mode.
+func TestProperty_Create_SensitiveMountAlwaysRejected(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	sensitivePaths := []struct {
+		name string
+		path string
+	}{
+		{"ssh", homeDir + "/.ssh"},
+		{"aws", homeDir + "/.aws"},
+		{"config", homeDir + "/.config"},
+		{"gnupg", homeDir + "/.gnupg"},
+		{"kube", homeDir + "/.kube"},
+		{"docker_dir", homeDir + "/.docker"},
+		{"docker_socket", "/var/run/docker.sock"},
+	}
+	for _, sp := range sensitivePaths {
+		for _, mode := range []string{"ro", "rw"} {
+			name := fmt.Sprintf("%s_%s", sp.name, mode)
+			t.Run(name, func(t *testing.T) {
+				mb := &mockCreateBackend{name: "mock", available: true}
+				setupCreateTest(t, mb)
+
+				root := RootCmd()
+				root.SetArgs([]string{"create", "testvm", "--mount", sp.path + ":/mnt:" + mode})
+				err := root.Execute()
+
+				require.Error(t, err, "sensitive path %q with mode %s must be rejected", sp.path, mode)
+				cliErr, ok := err.(ui.CLIError)
+				require.True(t, ok)
+				assert.Equal(t, "mount_path_rejected", cliErr.Code)
+				assert.Empty(t, mb.created)
+			})
+		}
+	}
+}
+
+// Property: no sensitive mount ever reaches the backend.
+func TestProperty_Create_SensitiveMountNeverReachesBackend(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	paths := []string{
+		homeDir + "/.ssh",
+		homeDir + "/.aws",
+		homeDir + "/.kube",
+		homeDir + "/.gnupg",
+		"/var/run/docker.sock",
+	}
+	for _, p := range paths {
+		t.Run(p, func(t *testing.T) {
+			mb := &mockCreateBackend{name: "mock", available: true}
+			setupCreateTest(t, mb)
+
+			root := RootCmd()
+			root.SetArgs([]string{"create", "vm", "--mount", p + ":/mnt"})
+			_ = root.Execute()
+
+			assert.Empty(t, mb.created, "backend Create must never be called for sensitive mount %q", p)
+		})
+	}
+}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/security"
 	"sd/internal/ssh"
 	"sd/internal/ui"
 )
@@ -83,6 +84,20 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			return ui.CLIError{
 				Code:    "invalid_argument",
 				Message: fmt.Sprintf("invalid mount spec: host and guest paths are required (got host=%q guest=%q)", m.HostPath, m.GuestPath),
+			}
+		}
+	}
+
+	// REQ-004-005: Validate mount paths against sensitive directories
+	for _, m := range vmCfg.Mounts {
+		mode := security.MountReadOnly
+		if m.Writable {
+			mode = security.MountReadWrite
+		}
+		if err := security.ValidateMountPath(m.HostPath, mode, nil); err != nil {
+			return ui.CLIError{
+				Code:    "mount_path_rejected",
+				Message: err.Error(),
 			}
 		}
 	}
