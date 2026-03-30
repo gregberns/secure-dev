@@ -533,6 +533,7 @@ func TestIsKnownConfigKey(t *testing.T) {
 	assert.True(t, isKnownConfigKey("defaults.vm"))
 	assert.True(t, isKnownConfigKey("security.mount_policy"))
 	assert.True(t, isKnownConfigKey("security.egress_allowlist"))
+	assert.True(t, isKnownConfigKey("security.sensitive_paths"))
 	assert.False(t, isKnownConfigKey("unknown.key"))
 	assert.False(t, isKnownConfigKey(""))
 }

@@ -233,6 +233,43 @@ func resolvePath(path string) string {
 	return resolved
 }
 
+// SensitivePathSource indicates where a sensitive path entry comes from.
+// REQ-004-023
+type SensitivePathSource string
+
+const (
+	SensitivePathBuiltin SensitivePathSource = "builtin"
+	SensitivePathUser   SensitivePathSource = "user"
+)
+
+// SensitivePathEntry is a single sensitive path with its source.
+// REQ-004-023: Used for listing the complete merged set with source tracking.
+type SensitivePathEntry struct {
+	Path   string               `json:"path"`
+	Source SensitivePathSource `json:"source"`
+}
+
+// MergedSensitivePaths returns the complete list of sensitive paths,
+// merging built-in defaults with user-configured extra paths.
+// REQ-004-023: User-configured sensitive paths are merged with the built-in list.
+func MergedSensitivePaths(extraPaths []string) []SensitivePathEntry {
+	var result []SensitivePathEntry
+	for _, e := range sensitivePathEntries {
+		result = append(result, SensitivePathEntry{
+			Path:   e.expanded,
+			Source: SensitivePathBuiltin,
+		})
+	}
+	for _, p := range extraPaths {
+		expanded := expandHome(p)
+		result = append(result, SensitivePathEntry{
+			Path:   filepath.Clean(expanded),
+			Source: SensitivePathUser,
+		})
+	}
+	return result
+}
+
 // expandHome expands ~ and $HOME in a path.
 func expandHome(path string) string {
 	homeDir, err := os.UserHomeDir()

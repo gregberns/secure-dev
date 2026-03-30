@@ -139,6 +139,7 @@ func (l *Loader) Get() *Config {
 
 	cfg.Security.MountPolicy = l.v.GetString("security.mount_policy")
 	cfg.Security.EgressAllowlist = l.v.GetStringSlice("security.egress_allowlist")
+	cfg.Security.SensitivePaths = l.v.GetStringSlice("security.sensitive_paths")
 
 	// Try to unmarshal VMs
 	vmKeys := l.v.GetStringMap("vms")

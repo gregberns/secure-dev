@@ -26,6 +26,7 @@ type Defaults struct {
 type Security struct {
 	EgressAllowlist []string `yaml:"egress_allowlist" mapstructure:"egress_allowlist"`
 	MountPolicy     string   `yaml:"mount_policy" mapstructure:"mount_policy"`
+	SensitivePaths  []string `yaml:"sensitive_paths" mapstructure:"sensitive_paths"`
 }
 
 // MountPolicy valid values.
@@ -142,10 +143,11 @@ func ValidateVMStatus(status string) error {
 }
 
 // SecurityKeys is the set of config keys that are security-sensitive.
-// REQ-005-017
+// REQ-005-017, REQ-004-023
 var SecurityKeys = []string{
 	"security.mount_policy",
 	"security.egress_allowlist",
+	"security.sensitive_paths",
 }
 
 // IsSecurityKey returns true if the key is a security-sensitive key.

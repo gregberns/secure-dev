@@ -612,3 +612,14 @@ REQ-007-005: Implemented VSOCK/TCP transport detection in SSHConfig.
   - `mockDestroySnapshotBackend` digital twin implementing Backend + Snapshotter with configurable errors
   - Unit tests: NoSnapshotFlag, AutoSnapshot_Created, AutoSnapshot_HumanOutput, AutoSnapshot_JSONOutput, NoSnapshotFlag_SkipsSnapshot, NoSnapshotFlag_JSONOutput, SnapshotFailure_NonFatal, SnapshotFailure_JSONNoTag, NonSnapshotterBackend_NoAutoSnapshot, NonSnapshotterBackend_JSONNoTag
   - Property tests: SnapshotterAlwaysSnapshots (5 names), NoSnapshotNeverCreates (5 names), AutoSnapshotJSONValid (5 names), NonSnapshotterJSONNoTag (3 names), SnapshotFailureNeverBlocks (3 names), SnapshotTagPrefix (10 iterations)
+
+### Sensitive Directory List Configurability implemented (REQ-004-023)
+- `internal/config/types.go`: Added `SensitivePaths []string` field to `Security` struct, added `security.sensitive_paths` to `SecurityKeys`
+- `internal/config/loader.go`: Populated `Security.SensitivePaths` from viper in `Get()` method
+- `internal/cmd/config.go`: Added `security.sensitive_paths` to `knownConfigKeys`
+- `internal/cmd/create.go`: Wired `Security.SensitivePaths` from config into `ValidateMountPath` call as `extraSensitivePaths`
+- `internal/security/mount.go`: Added `SensitivePathEntry` type, `SensitivePathBuiltin`/`SensitivePathUser` source constants, `MergedSensitivePaths()` function that merges built-in + user-configured paths with source tracking
+- Tests in `internal/security/sensitive_paths_test.go` (24 tests):
+  - Unit tests: MergedSensitivePaths empty/multiple/expand-home/clean-paths/builtins-always-present, ValidateMountPath with merged extra paths (exact + children rejected), SensitivePathEntry JSON serialization
+  - Property tests: merged always contains all defaults (100), source consistency (100), extra paths never reduce protection (100), user-configured paths always reject themselves (100), JSON round-trip lossless (100), merged never nil (100), empty extra equals builtin count (100)
+- Updated `internal/cmd/config_test.go`: Added `security.sensitive_paths` to `TestIsKnownConfigKey`

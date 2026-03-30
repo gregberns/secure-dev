@@ -89,12 +89,18 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// REQ-004-005: Validate mount paths against sensitive directories
+	// REQ-004-023: Include user-configured extra sensitive paths
+	var extraSensitivePaths []string
+	if ldr := Loader(); ldr != nil {
+		cfg := ldr.Get()
+		extraSensitivePaths = cfg.Security.SensitivePaths
+	}
 	for _, m := range vmCfg.Mounts {
 		mode := security.MountReadOnly
 		if m.Writable {
 			mode = security.MountReadWrite
 		}
-		if err := security.ValidateMountPath(m.HostPath, mode, nil); err != nil {
+		if err := security.ValidateMountPath(m.HostPath, mode, extraSensitivePaths); err != nil {
 			return ui.CLIError{
 				Code:    "mount_path_rejected",
 				Message: err.Error(),

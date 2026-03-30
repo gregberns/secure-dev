@@ -33,6 +33,7 @@ var knownConfigKeys = []string{
 	"defaults.vm",
 	"security.mount_policy",
 	"security.egress_allowlist",
+	"security.sensitive_paths",
 }
 
 // configEntry represents a single config key-value-source triplet.
