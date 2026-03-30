@@ -3,12 +3,14 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/provision"
 	"sd/internal/security"
 	"sd/internal/ssh"
 	"sd/internal/ui"
@@ -151,6 +153,19 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006 step 5: Run provisioning modules after VM creation.
+	modulesFlag, _ := cmd.Flags().GetStringSlice("modules")
+	provResult := runCreateProvision(cmd.Context(), f, b, name, modulesFlag)
+	if provResult != nil && provResult.Failed {
+		// Provisioning failed -- clean up the partially-created VM
+		f.Progress(fmt.Sprintf("Provisioning failed, cleaning up VM %q...", name))
+		b.Destroy(cmd.Context(), name)
+		return ui.CLIError{
+			Code:    "provision_script_failed",
+			Message: fmt.Sprintf("module %q failed: %s", provResult.Module, provResult.Error),
+		}
+	}
+
 	type createResult struct {
 		Name    string `json:"name"`
 		Backend string `json:"backend"`
@@ -171,6 +186,53 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Sprintf("VM %q created successfully.\n", name)
 	})
 	return nil
+}
+
+// runCreateProvision runs provisioning modules on a newly created VM.
+// REQ-001-006 step 5: Provision after VM creation.
+// Returns nil if no modules are requested, otherwise the provisioning result.
+func runCreateProvision(ctx context.Context, f *ui.Formatter, b backend.Backend, name string, modulesFlag []string) *provision.ProvisionResult {
+	// Resolve which modules to run
+	allModules, err := loadBuiltinModules()
+	if err != nil {
+		f.Progress(fmt.Sprintf("Warning: could not load provisioning modules: %v", err))
+		return nil
+	}
+
+	var resolved []provision.Module
+	if len(modulesFlag) > 0 {
+		// Trim whitespace from module names
+		requested := make([]string, len(modulesFlag))
+		for i, m := range modulesFlag {
+			requested[i] = strings.TrimSpace(m)
+		}
+		resolved, err = provision.ResolveRequested(allModules, requested)
+	} else {
+		// No modules specified -- provision all modules by default
+		resolved, err = provision.ResolveAll(allModules)
+	}
+	if err != nil {
+		f.Progress(fmt.Sprintf("Warning: could not resolve modules: %v", err))
+		return nil
+	}
+
+	if len(resolved) == 0 {
+		return nil
+	}
+
+	f.Progress(fmt.Sprintf("Provisioning VM %q with %d module(s)...", name, len(resolved)))
+
+	// Execute provisioning via backend Exec
+	execFn := func(execCtx context.Context, vmName string, command []string) (string, string, int, error) {
+		result, execErr := b.Exec(execCtx, vmName, command)
+		if execErr != nil {
+			return "", "", 0, execErr
+		}
+		return result.Stdout, result.Stderr, result.ExitCode, nil
+	}
+
+	result := provision.Provision(ctx, execFn, name, resolved)
+	return &result
 }
 
 // buildVMConfig constructs a backend.VMConfig from CLI flags and config defaults.
@@ -232,9 +294,9 @@ func buildVMConfig(cmd *cobra.Command, backendName string) backend.VMConfig {
 		}
 	}
 
-	// Collect modules (for future provisioning integration)
+	// Collect modules -- consumed by runCreateProvision, not backend
 	modules, _ := cmd.Flags().GetStringSlice("modules")
-	_ = modules // consumed by provisioning system, not backend
+	_ = modules
 
 	_ = egress // consumed by security subsystem, not backend
 

@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/provision"
 	"sd/internal/ui"
 )
 
@@ -188,7 +189,7 @@ func TestCreateCommand_BasicCreate_HumanOutput(t *testing.T) {
 
 	root := RootCmd()
 	root.SetArgs([]string{"create", "testvm"})
-	execErr := root.Execute()
+	provExecErr := root.Execute()
 
 	w.Close()
 	os.Stdout = oldStdout
@@ -196,7 +197,7 @@ func TestCreateCommand_BasicCreate_HumanOutput(t *testing.T) {
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
 
-	require.NoError(t, execErr)
+	require.NoError(t, provExecErr)
 	assert.Contains(t, buf.String(), "testvm")
 	assert.Contains(t, buf.String(), "created")
 
@@ -217,7 +218,7 @@ func TestCreateCommand_BasicCreate_JSONOutput(t *testing.T) {
 
 	root := RootCmd()
 	root.SetArgs([]string{"--json", "create", "testvm"})
-	execErr := root.Execute()
+	provExecErr := root.Execute()
 
 	w.Close()
 	os.Stdout = oldStdout
@@ -225,7 +226,7 @@ func TestCreateCommand_BasicCreate_JSONOutput(t *testing.T) {
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
 
-	require.NoError(t, execErr)
+	require.NoError(t, provExecErr)
 
 	var result map[string]any
 	err = json.Unmarshal(buf.Bytes(), &result)
@@ -458,7 +459,7 @@ func TestProperty_CreateJSONAlwaysValid(t *testing.T) {
 
 			root := RootCmd()
 			root.SetArgs([]string{"--json", "create", name})
-			execErr := root.Execute()
+			provExecErr := root.Execute()
 
 			w.Close()
 			os.Stdout = oldStdout
@@ -466,7 +467,7 @@ func TestProperty_CreateJSONAlwaysValid(t *testing.T) {
 			var buf bytes.Buffer
 			_, _ = buf.ReadFrom(r)
 
-			require.NoError(t, execErr)
+			require.NoError(t, provExecErr)
 
 			var result map[string]any
 			err = json.Unmarshal(buf.Bytes(), &result)
@@ -500,7 +501,7 @@ func TestProperty_HumanOutputContainsName(t *testing.T) {
 
 			root := RootCmd()
 			root.SetArgs([]string{"create", name})
-			execErr := root.Execute()
+			provExecErr := root.Execute()
 
 			w.Close()
 			os.Stdout = oldStdout
@@ -508,7 +509,7 @@ func TestProperty_HumanOutputContainsName(t *testing.T) {
 			var buf bytes.Buffer
 			_, _ = buf.ReadFrom(r)
 
-			require.NoError(t, execErr)
+			require.NoError(t, provExecErr)
 			assert.Contains(t, buf.String(), name, "human output must contain VM name %q", name)
 		})
 	}
@@ -835,10 +836,10 @@ func TestCreateCommand_MountSensitivePath_JSON(t *testing.T) {
 
 	root := RootCmd()
 	root.SetArgs([]string{"--json", "create", "testvm", "--mount", homeDir + "/.ssh:/keys"})
-	execErr := root.Execute()
+	provExecErr := root.Execute()
 
-	require.Error(t, execErr)
-	cliErr, ok := execErr.(ui.CLIError)
+	require.Error(t, provExecErr)
+	cliErr, ok := provExecErr.(ui.CLIError)
 	require.True(t, ok, "error must be CLIError in JSON mode")
 	assert.Equal(t, "mount_path_rejected", cliErr.Code)
 	assert.Contains(t, cliErr.Message, "sensitive")
@@ -902,6 +903,168 @@ func TestProperty_Create_SensitiveMountAlwaysRejected(t *testing.T) {
 				assert.Empty(t, mb.created)
 			})
 		}
+	}
+}
+
+// --- Provisioning integration tests (REQ-001-006 step 5) ---
+
+// setupProvisionCreateTest configures the test environment with a mock backend
+// for create+provision integration tests. It reuses the mockProvisionBackend
+// from provision_test.go and adds create-command flag resets.
+func setupProvisionCreateTest(t *testing.T, mb *mockProvisionBackend) {
+	t.Helper()
+	setupProvisionTest(t, mb)
+
+	// Also reset create command flags
+	root := RootCmd()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "create" {
+			resetSliceFlag(cmd, "mount")
+			resetSliceFlag(cmd, "allow-egress")
+			resetSliceFlag(cmd, "modules")
+			_ = cmd.Flags().Set("backend", "")
+			_ = cmd.Flags().Set("cpus", "0")
+			_ = cmd.Flags().Set("memory", "")
+			_ = cmd.Flags().Set("disk", "")
+			break
+		}
+	}
+}
+
+func TestCreateCommand_Provisioning_RunsModules(t *testing.T) {
+	mb := &mockProvisionBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+	setupProvisionCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	// Provisioning should have called Exec (all modules run by default)
+	assert.NotEmpty(t, mb.execCalls, "provisioning must call Exec for each module script")
+}
+
+func TestCreateCommand_Provisioning_WithModulesFlag(t *testing.T) {
+	mb := &mockProvisionBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+	setupProvisionCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--modules", "base"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	// Should only provision base module
+	assert.NotEmpty(t, mb.execCalls, "provisioning must call Exec for base module")
+}
+
+func TestCreateCommand_Provisioning_ExecFailure(t *testing.T) {
+	mb := &mockProvisionBackend{
+		name:      "mock",
+		available: true,
+		statusMap: map[string]backend.VMStatus{},
+		execErr:   fmt.Errorf("exec failed"),
+	}
+	setupProvisionCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be CLIError")
+	assert.Equal(t, "provision_script_failed", cliErr.Code)
+}
+
+func TestCreateCommand_Provisioning_ModuleLoadFailure_NonFatal(t *testing.T) {
+	mb := &mockProvisionBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+	setupProvisionCreateTest(t, mb)
+
+	// Override loadBuiltinModules to fail
+	origLoad := loadBuiltinModules
+	loadBuiltinModules = func() ([]provision.Module, error) {
+		return nil, fmt.Errorf("module load error")
+	}
+	t.Cleanup(func() { loadBuiltinModules = origLoad })
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm"})
+	err := root.Execute()
+
+	// Create should still succeed (provisioning failure is a warning)
+	require.NoError(t, err)
+	assert.Empty(t, mb.execCalls, "no Exec calls when modules fail to load")
+}
+
+func TestCreateCommand_Provisioning_ExecRecordsVMName(t *testing.T) {
+	mb := &mockProvisionBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+	setupProvisionCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "myvm", "--modules", "base"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	for _, call := range mb.execCalls {
+		assert.Equal(t, "myvm", call.VMName, "Exec must be called with the correct VM name")
+	}
+}
+
+func TestCreateCommand_Provisioning_ExecUsesSudo_SystemMode(t *testing.T) {
+	mb := &mockProvisionBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+	setupProvisionCreateTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--modules", "base"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	// Base module has system-mode scripts that should use sudo
+	foundSudo := false
+	for _, call := range mb.execCalls {
+		if len(call.Command) > 0 && call.Command[0] == "sudo" {
+			foundSudo = true
+			break
+		}
+	}
+	assert.True(t, foundSudo, "system-mode scripts must be executed with sudo")
+}
+
+// Property: provisioning always runs Exec for default create (no --modules flag).
+func TestProperty_Create_ProvisioningAlwaysRuns(t *testing.T) {
+	for _, name := range []string{"vm-1", "test-vm", "dev"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockProvisionBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+			setupProvisionCreateTest(t, mb)
+
+			root := RootCmd()
+			root.SetArgs([]string{"create", name})
+			err := root.Execute()
+
+			require.NoError(t, err)
+			assert.NotEmpty(t, mb.execCalls, "provisioning must run Exec for %q", name)
+		})
+	}
+}
+
+// Property: provisioning failure always triggers cleanup.
+func TestProperty_Create_ProvisionFailureAlwaysCleansUp(t *testing.T) {
+	for _, name := range []string{"vm-a", "vm-b", "vm-c"} {
+		t.Run(name, func(t *testing.T) {
+			mb := &mockProvisionBackend{
+				name:      "mock",
+				available: true,
+				statusMap: map[string]backend.VMStatus{},
+				execErr:   fmt.Errorf("provision failed"),
+			}
+			setupProvisionCreateTest(t, mb)
+
+			root := RootCmd()
+			root.SetArgs([]string{"create", name})
+			err := root.Execute()
+
+			require.Error(t, err)
+		})
 	}
 }
 
