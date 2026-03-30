@@ -555,3 +555,20 @@ REQ-007-005: Implemented VSOCK/TCP transport detection in SSHConfig.
   - List: human output (table with defaults + user), JSON output (source field per entry), no user domains (only defaults), empty VM, missing args, read error
   - Round-trip: full add -> list -> remove lifecycle
   - Property tests: add JSON always valid (5 cases), remove JSON always valid (3 cases), list JSON always valid (3 cases), error codes snake_case (8 cases), list contains all defaults (3 runs), add calls write once (3 VMs), list JSON required fields (domain + source)
+
+### Credential injection via SendEnv/AcceptEnv implemented (REQ-004-011)
+- `internal/cmd/connect.go` additions:
+  - `readCredFunc` injectable for loading VM credentials (digital twin support)
+  - `isCredentialKey` filters env vars to only credential patterns: SD_*, ANTHROPIC_*, GITHUB_*, GH_*
+  - `sshRunner` signature updated to accept `env map[string]string` parameter
+  - `defaultSSHRunner` sets env vars on SSH process via `cmd.Env` (never written to disk)
+  - `buildSSHArgs` includes `-o SendEnv=SD_* ANTHROPIC_* GITHUB_* GH_*`
+  - `runConnect` loads credentials from VM config, filters, and passes to SSH runner
+  - Progress message reports number of injected credentials
+  - Credential read errors are non-fatal (connection proceeds without credentials)
+- `internal/provision/modules/ssh-hardening.yaml`: Added `AcceptEnv SD_* ANTHROPIC_* GITHUB_* GH_*` to sshd config
+- Tests in `internal/cmd/connect_test.go` (7 new tests):
+  - Unit tests: SendEnv in SSH args (all 4 patterns), isCredentialKey (8 cases), credential injection (loads + filters), no credentials (empty env), read error non-fatal
+  - Property tests: SendEnv always present (TCP + VSOCK), credential key filtering (4 include + 7 exclude)
+- Updated all existing sshRunner overrides to accept env parameter (11 test sites)
+- Updated modules_test.go: AcceptEnv added to required sshd directives list

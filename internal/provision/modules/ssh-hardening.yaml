@@ -14,6 +14,7 @@ scripts:
       GatewayPorts no
       PermitTunnel no
       X11Forwarding no
+      AcceptEnv SD_* ANTHROPIC_* GITHUB_* GH_*
       SSHD_CONFIG
       chmod 644 /etc/ssh/sshd_config.d/99-sd-restrictions.conf
       # Reload sshd to apply changes (safe: preserves existing sessions)

@@ -26,12 +26,17 @@ import (
 // REQ-007-009
 var sessionNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
-// sshRunner is a function that runs an SSH command. Overridden in tests.
+// sshRunner is a function that runs an SSH command with optional environment variables.
+// Overridden in tests.
 var sshRunner = defaultSSHRunner
 
 // scanAndVerifyHostKey scans the VM's current host key and verifies it against the stored key.
 // Overridden in tests with a digital twin.
 var scanAndVerifyHostKey = defaultScanAndVerifyHostKey
+
+// readCredFunc loads credential environment variables for a VM from its config.
+// Overridden in tests with a digital twin.
+var readCredFunc = defaultReadCredFunc
 
 func defaultScanAndVerifyHostKey(sdHome, vmName, host string, port int) error {
 	keyData, err := ssh.HostKeyScanner(host, port)
@@ -41,11 +46,24 @@ func defaultScanAndVerifyHostKey(sdHome, vmName, host string, port int) error {
 	return ssh.VerifyHostKey(sdHome, vmName, keyData)
 }
 
-func defaultSSHRunner(name string, args []string) error {
+func defaultReadCredFunc(sdHome, vmName string) (map[string]string, error) {
+	return defaultReadVMEnv(sdHome, vmName)
+}
+
+func defaultSSHRunner(name string, args []string, env map[string]string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// REQ-004-011: Set credentials as environment variables on the SSH process.
+	// They are sent to the VM via the SendEnv SSH mechanism, never written to disk.
+	if len(env) > 0 {
+		cmdEnv := os.Environ()
+		for k, v := range env {
+			cmdEnv = append(cmdEnv, k+"="+v)
+		}
+		cmd.Env = cmdEnv
+	}
 	return cmd.Run()
 }
 
@@ -223,6 +241,24 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	// Build SSH command arguments
 	sshArgs := buildSSHArgs(sshCfg, name, sessionName, noTmux, newWindow, forwards)
 
+	// REQ-004-011: Load credentials from VM config for SendEnv injection.
+	var creds map[string]string
+	if l := Loader(); l != nil {
+		env, err := readCredFunc(l.SDHome(), name)
+		if err == nil && len(env) > 0 {
+			// Filter to only credential keys (GITHUB_TOKEN, ANTHROPIC_API_KEY, SD_*, GH_*)
+			creds = make(map[string]string, len(env))
+			for k, v := range env {
+				if isCredentialKey(k) {
+					creds[k] = v
+				}
+			}
+			if len(creds) > 0 {
+				f.Progress(fmt.Sprintf("Injecting %d credential(s) via SSH SendEnv", len(creds)))
+			}
+		}
+	}
+
 	// JSON output: report connection info and exit (interactive session can't produce JSON)
 	if f.JSONMode() {
 		type connectResult struct {
@@ -242,7 +278,8 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run the SSH command (interactive session)
-	if err := sshRunner("ssh", sshArgs); err != nil {
+	// REQ-004-011: creds are set as env vars on the SSH process, sent via SendEnv/AcceptEnv.
+	if err := sshRunner("ssh", sshArgs, creds); err != nil {
 		// Distinguish between SSH errors and exit codes from the remote session
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -329,6 +366,8 @@ func buildSSHArgs(cfg backend.SSHConfig, vmName, session string, noTmux, newWind
 	args = append(args, "-o", "ForwardAgent=no")
 	args = append(args, "-o", "ForwardX11=no")
 	args = append(args, "-o", "LogLevel=ERROR")
+	// REQ-004-011: Send credential environment variables to the VM via SSH SendEnv.
+	args = append(args, "-o", "SendEnv=SD_* ANTHROPIC_* GITHUB_* GH_*")
 
 	// Port forwarding
 	for _, fwd := range forwards {
@@ -383,4 +422,14 @@ func formatSSHError(err error, vmName string, cfg backend.SSHConfig) string {
 	default:
 		return fmt.Sprintf("Failed to connect to VM %q: %v", vmName, err)
 	}
+}
+
+// isCredentialKey returns true if the key matches the SendEnv patterns
+// that sshd is configured to accept: SD_*, ANTHROPIC_*, GITHUB_*, GH_*.
+// REQ-004-011
+func isCredentialKey(key string) bool {
+	return strings.HasPrefix(key, "SD_") ||
+		strings.HasPrefix(key, "ANTHROPIC_") ||
+		strings.HasPrefix(key, "GITHUB_") ||
+		strings.HasPrefix(key, "GH_")
 }

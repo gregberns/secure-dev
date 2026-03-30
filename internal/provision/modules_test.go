@@ -280,6 +280,7 @@ func TestLoadBuiltinModules_SshHardeningConfiguresPortForwarding(t *testing.T) {
 		"GatewayPorts no",
 		"PermitTunnel no",
 		"X11Forwarding no",
+		"AcceptEnv SD_* ANTHROPIC_* GITHUB_* GH_*",
 	}
 	for _, directive := range requiredDirectives {
 		assert.Contains(t, allScripts, directive,

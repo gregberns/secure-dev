@@ -112,7 +112,7 @@ func setupConnectTest(t *testing.T, mb *mockConnectBackend) {
 
 	// Capture SSH runner calls instead of actually running SSH
 	origSSHRunner := sshRunner
-	sshRunner = func(name string, args []string) error {
+	sshRunner = func(name string, args []string, env map[string]string) error {
 		return nil
 	}
 	t.Cleanup(func() { sshRunner = origSSHRunner })
@@ -397,7 +397,7 @@ func TestConnectCommand_NamedSession(t *testing.T) {
 
 	var capturedArgs []string
 	origSSHRunner := sshRunner
-	sshRunner = func(name string, args []string) error {
+	sshRunner = func(name string, args []string, env map[string]string) error {
 		capturedArgs = args
 		return nil
 	}
@@ -462,7 +462,7 @@ func TestConnectCommand_NoTmux(t *testing.T) {
 
 	var capturedArgs []string
 	origSSHRunner := sshRunner
-	sshRunner = func(name string, args []string) error {
+	sshRunner = func(name string, args []string, env map[string]string) error {
 		capturedArgs = args
 		return nil
 	}
@@ -486,7 +486,7 @@ func TestConnectCommand_NewWindow(t *testing.T) {
 
 	var capturedArgs []string
 	origSSHRunner := sshRunner
-	sshRunner = func(name string, args []string) error {
+	sshRunner = func(name string, args []string, env map[string]string) error {
 		capturedArgs = args
 		return nil
 	}
@@ -562,7 +562,7 @@ func TestConnectCommand_PortForwarding(t *testing.T) {
 
 	var capturedArgs []string
 	origSSHRunner := sshRunner
-	sshRunner = func(name string, args []string) error {
+	sshRunner = func(name string, args []string, env map[string]string) error {
 		capturedArgs = args
 		return nil
 	}
@@ -606,7 +606,7 @@ func TestConnectCommand_PortForwarding_WithBindAddr(t *testing.T) {
 
 	var capturedArgs []string
 	origSSHRunner := sshRunner
-	sshRunner = func(name string, args []string) error {
+	sshRunner = func(name string, args []string, env map[string]string) error {
 		capturedArgs = args
 		return nil
 	}
@@ -913,7 +913,7 @@ func TestProperty_ConnectRunningVM_CallsSSHRunner(t *testing.T) {
 
 			sshCalled := false
 			origSSHRunner := sshRunner
-			sshRunner = func(cmdName string, args []string) error {
+			sshRunner = func(cmdName string, args []string, env map[string]string) error {
 				sshCalled = true
 				return nil
 			}
@@ -1024,7 +1024,7 @@ func TestProperty_ConnectNonexistentVM_NeverCallsSSHRunner(t *testing.T) {
 			}
 			sshCalled := false
 			origSSHRunner := sshRunner
-			sshRunner = func(cmdName string, args []string) error {
+			sshRunner = func(cmdName string, args []string, env map[string]string) error {
 				sshCalled = true
 				return nil
 			}
@@ -1434,6 +1434,199 @@ func TestProperty_Connect_HostKeyChanged_ErrorCode(t *testing.T) {
 			cliErr := err.(ui.CLIError)
 			assert.Equal(t, "ssh_host_key_changed", cliErr.Code, "must use ssh_host_key_changed error code for %q", name)
 			assert.Contains(t, cliErr.Message, "SECURITY")
+		})
+	}
+}
+
+// --- REQ-004-011: Credential injection tests ---
+
+func TestBuildSSHArgs_SendEnv(t *testing.T) {
+	// REQ-004-011: SSH args must include SendEnv for credential patterns
+	cfg := backend.SSHConfig{
+		Host:         "127.0.0.1",
+		Port:         60022,
+		User:         "dev",
+		IdentityFile: "/keys/id_ed25519",
+	}
+	args := buildSSHArgs(cfg, "myvm", "sd-myvm", false, false, nil)
+
+	found := false
+	for i, arg := range args {
+		if arg == "-o" && i+1 < len(args) {
+			if strings.HasPrefix(args[i+1], "SendEnv=") {
+				found = true
+				sendEnv := args[i+1]
+				assert.Contains(t, sendEnv, "SD_*", "SendEnv must include SD_*")
+				assert.Contains(t, sendEnv, "ANTHROPIC_*", "SendEnv must include ANTHROPIC_*")
+				assert.Contains(t, sendEnv, "GITHUB_*", "SendEnv must include GITHUB_*")
+				assert.Contains(t, sendEnv, "GH_*", "SendEnv must include GH_*")
+			}
+		}
+	}
+	assert.True(t, found, "SSH args must include SendEnv option (REQ-004-011)")
+}
+
+func TestIsCredentialKey(t *testing.T) {
+	tests := []struct {
+		key      string
+		expected bool
+	}{
+		{"GITHUB_TOKEN", true},
+		{"ANTHROPIC_API_KEY", true},
+		{"GH_TOKEN", true},
+		{"SD_CUSTOM", true},
+		{"PATH", false},
+		{"HOME", false},
+		{"MY_VAR", false},
+		{"GIT_AUTHOR_NAME", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			assert.Equal(t, tc.expected, isCredentialKey(tc.key))
+		})
+	}
+}
+
+func TestConnectCommand_CredentialInjection(t *testing.T) {
+	// REQ-004-011: connect loads credentials and passes them to SSH runner
+	mb := defaultMockConnectBackend()
+	setupConnectTest(t, mb)
+
+	// Set up digital twin for credential reading
+	origReadCred := readCredFunc
+	readCredFunc = func(sdHome, vmName string) (map[string]string, error) {
+		return map[string]string{
+			"GITHUB_TOKEN":      "gh_token_abc123",
+			"ANTHROPIC_API_KEY": "sk-ant-test123",
+			"OTHER_VAR":         "should-be-filtered",
+		}, nil
+	}
+	defer func() { readCredFunc = origReadCred }()
+
+	var capturedEnv map[string]string
+	origSSHRunner := sshRunner
+	sshRunner = func(name string, args []string, env map[string]string) error {
+		capturedEnv = env
+		return nil
+	}
+	defer func() { sshRunner = origSSHRunner }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"connect", "myvm"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	require.NotNil(t, capturedEnv, "credentials must be passed to SSH runner")
+	assert.Equal(t, "gh_token_abc123", capturedEnv["GITHUB_TOKEN"])
+	assert.Equal(t, "sk-ant-test123", capturedEnv["ANTHROPIC_API_KEY"])
+	_, hasOther := capturedEnv["OTHER_VAR"]
+	assert.False(t, hasOther, "non-credential env vars must be filtered out")
+}
+
+func TestConnectCommand_NoCredentials(t *testing.T) {
+	// REQ-004-011: connect works without configured credentials
+	mb := defaultMockConnectBackend()
+	setupConnectTest(t, mb)
+
+	origReadCred := readCredFunc
+	readCredFunc = func(sdHome, vmName string) (map[string]string, error) {
+		return map[string]string{}, nil
+	}
+	defer func() { readCredFunc = origReadCred }()
+
+	var capturedEnv map[string]string
+	origSSHRunner := sshRunner
+	sshRunner = func(name string, args []string, env map[string]string) error {
+		capturedEnv = env
+		return nil
+	}
+	defer func() { sshRunner = origSSHRunner }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"connect", "myvm"})
+	err := root.Execute()
+
+	require.NoError(t, err)
+	if capturedEnv != nil {
+		assert.Empty(t, capturedEnv, "no credentials should be injected when none configured")
+	}
+}
+
+func TestConnectCommand_CredentialReadError_NonFatal(t *testing.T) {
+	// REQ-004-011: credential read errors should not block connection
+	mb := defaultMockConnectBackend()
+	setupConnectTest(t, mb)
+
+	origReadCred := readCredFunc
+	readCredFunc = func(sdHome, vmName string) (map[string]string, error) {
+		return nil, fmt.Errorf("config not found")
+	}
+	defer func() { readCredFunc = origReadCred }()
+
+	sshCalled := false
+	origSSHRunner := sshRunner
+	sshRunner = func(name string, args []string, env map[string]string) error {
+		sshCalled = true
+		return nil
+	}
+	defer func() { sshRunner = origSSHRunner }()
+
+	root := RootCmd()
+	root.SetArgs([]string{"connect", "myvm"})
+	err := root.Execute()
+
+	require.NoError(t, err, "credential read error should be non-fatal")
+	assert.True(t, sshCalled, "SSH must still be called despite credential read error")
+}
+
+// Property: SendEnv always includes all required patterns (REQ-004-011).
+func TestProperty_Connect_SendEnvAlwaysIncludesCredentialPatterns(t *testing.T) {
+	for _, transport := range []string{"tcp", "vsock"} {
+		t.Run(transport, func(t *testing.T) {
+			cfg := backend.SSHConfig{
+				Host:         "127.0.0.1",
+				Port:         60022,
+				User:         "dev",
+				IdentityFile: "/keys/id_ed25519",
+			}
+			if transport == "vsock" {
+				cfg = backend.SSHConfig{
+					User:         "dev",
+					Port:         22,
+					IdentityFile: "/keys/id_ed25519",
+					ProxyCommand: "limactl ssh --stdio testvm",
+				}
+			}
+			args := buildSSHArgs(cfg, "testvm", "sd-testvm", false, false, nil)
+
+			found := false
+			for i, arg := range args {
+				if arg == "-o" && i+1 < len(args) && strings.HasPrefix(args[i+1], "SendEnv=") {
+					found = true
+					sendEnv := args[i+1]
+					assert.Contains(t, sendEnv, "SD_*")
+					assert.Contains(t, sendEnv, "ANTHROPIC_*")
+					assert.Contains(t, sendEnv, "GITHUB_*")
+					assert.Contains(t, sendEnv, "GH_*")
+				}
+			}
+			assert.True(t, found, "SendEnv must be present for %s transport", transport)
+		})
+	}
+}
+
+// Property: credential key filtering only allows SD_*, ANTHROPIC_*, GITHUB_*, GH_*.
+func TestProperty_Connect_CredentialKeyFiltering(t *testing.T) {
+	mustInclude := []string{"GITHUB_TOKEN", "ANTHROPIC_API_KEY", "GH_TOKEN", "SD_MY_VAR"}
+	for _, key := range mustInclude {
+		t.Run("include_"+key, func(t *testing.T) {
+			assert.True(t, isCredentialKey(key), "%q must be recognized as a credential key", key)
+		})
+	}
+	mustExclude := []string{"PATH", "HOME", "TERM", "SHELL", "USER", "GIT_AUTHOR_NAME", "RANDOM_VAR"}
+	for _, key := range mustExclude {
+		t.Run("exclude_"+key, func(t *testing.T) {
+			assert.False(t, isCredentialKey(key), "%q must NOT be recognized as a credential key", key)
 		})
 	}
 }
