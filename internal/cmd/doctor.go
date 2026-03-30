@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 	"sd/internal/ui"
 )
 
@@ -25,6 +26,11 @@ var lookPath = exec.LookPath
 
 // statPath checks if a file exists. Overridden in tests with a digital twin.
 var statPath = os.Stat
+
+// readProjectConfigFunc reads and parses a project-level config file.
+// Returns nil if the file doesn't exist. Overridden in tests with a digital twin.
+// REQ-004-029
+var readProjectConfigFunc = readProjectConfigFromDisk
 
 // requiredBinaries lists the binaries that sd depends on.
 // REQ-002-007
@@ -70,6 +76,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	// Check for cached git credentials (REQ-004-030)
 	checks = append(checks, checkGitCredentials())
+
+	// Check for security keys in project-level config (REQ-004-029)
+	checks = append(checks, checkProjectSecurityConfig())
 
 	// Determine overall status
 	allPassed := true
@@ -193,6 +202,99 @@ func checkGitCredentials() doctorCheck {
 		Name:    "git_credentials",
 		Status:  "pass",
 		Message: "no cached git credentials",
+	}
+}
+
+// readProjectConfigFromDisk reads a YAML config file from disk and returns
+// the top-level keys. Returns nil if the file doesn't exist.
+// REQ-004-029
+func readProjectConfigFromDisk(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", path, err)
+	}
+	return raw, nil
+}
+
+// checkProjectSecurityConfig checks that project-level config does not contain
+// security keys, which are ignored by the config loader.
+// REQ-004-029: sd doctor warns if a project-level .sd/config.yaml contains any security.* keys
+func checkProjectSecurityConfig() doctorCheck {
+	if Loader() == nil {
+		return doctorCheck{
+			Name:    "project_security_config",
+			Status:  "pass",
+			Message: "no loader available to check project config",
+		}
+	}
+
+	projectDir := Loader().ProjectDir()
+	if projectDir == "" {
+		return doctorCheck{
+			Name:    "project_security_config",
+			Status:  "pass",
+			Message: "no project directory configured",
+		}
+	}
+
+	configPath := filepath.Join(projectDir, "config.yaml")
+	raw, err := readProjectConfigFunc(configPath)
+	if err != nil {
+		return doctorCheck{
+			Name:    "project_security_config",
+			Status:  "fail",
+			Message: fmt.Sprintf("cannot read project config: %v", err),
+		}
+	}
+	if raw == nil {
+		return doctorCheck{
+			Name:    "project_security_config",
+			Status:  "pass",
+			Message: "no project-level config file found",
+		}
+	}
+
+	// Check for security.* keys
+	securityVal, hasSecurity := raw["security"]
+	if !hasSecurity {
+		return doctorCheck{
+			Name:    "project_security_config",
+			Status:  "pass",
+			Message: "project config has no security keys",
+		}
+	}
+
+	// Found security keys - report which ones
+	securityMap, ok := securityVal.(map[string]any)
+	var foundKeys []string
+	if ok {
+		for k := range securityMap {
+			foundKeys = append(foundKeys, "security."+k)
+		}
+	} else {
+		foundKeys = []string{"security"}
+	}
+
+	// Build actionable message listing all found keys
+	keyList := ""
+	for i, k := range foundKeys {
+		if i > 0 {
+			keyList += ", "
+		}
+		keyList += k
+	}
+
+	return doctorCheck{
+		Name:    "project_security_config",
+		Status:  "fail",
+		Message: fmt.Sprintf("project config contains security keys (%s) which are ignored; set these in ~/.sd/config.yaml or via CLI flags (REQ-004-029)", keyList),
 	}
 }
 

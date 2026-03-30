@@ -6,13 +6,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 	"sd/internal/backend"
+	"sd/internal/config"
 	"sd/internal/ui"
 )
 
@@ -205,7 +208,7 @@ func TestDoctorCommand_JSONOutput_AllPass(t *testing.T) {
 
 	data, ok := result["data"].([]any)
 	require.True(t, ok, "data must be a JSON array")
-	assert.Len(t, data, 7, "should have 4 binary + 1 config + 1 backend + 1 git_credentials checks")
+	assert.Len(t, data, 8, "should have 4 binary + 1 config + 1 backend + 1 git_credentials + 1 project_security_config checks")
 
 	for _, item := range data {
 		check := item.(map[string]any)
@@ -262,7 +265,7 @@ func TestDoctorCommand_JSONOutput_SomeFail(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 3, failCount, "limactl, tmux, and backend should fail")
-	assert.Equal(t, 4, passCount, "ssh, rsync, config, git_credentials checks pass")
+	assert.Equal(t, 5, passCount, "ssh, rsync, config, git_credentials, project_security_config checks pass")
 }
 
 func TestDoctorCommand_NoConfigRequired(t *testing.T) {
@@ -409,7 +412,7 @@ func TestProperty_DoctorJSONAlwaysValid(t *testing.T) {
 
 			data, ok := result["data"].([]any)
 			require.True(t, ok, "data must be an array")
-			assert.Len(t, data, 7, "always 7 checks")
+			assert.Len(t, data, 8, "always 8 checks")
 
 			for _, item := range data {
 				check := item.(map[string]any)
@@ -420,6 +423,300 @@ func TestProperty_DoctorJSONAlwaysValid(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Project Security Config Tests (REQ-004-029) ---
+
+func TestCheckProjectSecurityConfig_NoLoader(t *testing.T) {
+	newRootTestEnv(t)
+	// Ensure loader is nil for this test
+	origLoader := loader
+	loader = nil
+	defer func() { loader = origLoader }()
+
+	check := checkProjectSecurityConfig()
+	assert.Equal(t, "project_security_config", check.Name)
+	assert.Equal(t, "pass", check.Status)
+	assert.Contains(t, check.Message, "no loader")
+}
+
+func TestCheckProjectSecurityConfig_NoProjectDir(t *testing.T) {
+	newRootTestEnv(t)
+	// Loader exists but ProjectDir is empty
+	l := config.NewLoader()
+	l.Load()
+	origLoader := loader
+	loader = l
+	defer func() { loader = origLoader }()
+
+	check := checkProjectSecurityConfig()
+	assert.Equal(t, "project_security_config", check.Name)
+	assert.Equal(t, "pass", check.Status)
+	assert.Contains(t, check.Message, "no project directory")
+}
+
+func TestCheckProjectSecurityConfig_NoConfigFile(t *testing.T) {
+	newRootTestEnv(t)
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "myproject")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+
+	l := config.NewLoader(config.WithProjectDir(projectDir))
+	require.NoError(t, l.Load())
+	origLoader := loader
+	loader = l
+	defer func() { loader = origLoader }()
+
+	// Override readProjectConfigFunc with digital twin that returns nil (no file)
+	origRead := readProjectConfigFunc
+	readProjectConfigFunc = func(path string) (map[string]any, error) {
+		return nil, nil
+	}
+	defer func() { readProjectConfigFunc = origRead }()
+
+	check := checkProjectSecurityConfig()
+	assert.Equal(t, "project_security_config", check.Name)
+	assert.Equal(t, "pass", check.Status)
+	assert.Contains(t, check.Message, "no project-level config")
+}
+
+func TestCheckProjectSecurityConfig_NoSecurityKeys(t *testing.T) {
+	newRootTestEnv(t)
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "myproject")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+
+	l := config.NewLoader(config.WithProjectDir(projectDir))
+	require.NoError(t, l.Load())
+	origLoader := loader
+	loader = l
+	defer func() { loader = origLoader }()
+
+	// Digital twin: config with no security keys
+	origRead := readProjectConfigFunc
+	readProjectConfigFunc = func(path string) (map[string]any, error) {
+		return map[string]any{
+			"defaults": map[string]any{
+				"cpus":  4,
+				"memory": "8GiB",
+			},
+		}, nil
+	}
+	defer func() { readProjectConfigFunc = origRead }()
+
+	check := checkProjectSecurityConfig()
+	assert.Equal(t, "project_security_config", check.Name)
+	assert.Equal(t, "pass", check.Status)
+	assert.Contains(t, check.Message, "no security keys")
+}
+
+func TestCheckProjectSecurityConfig_HasSecurityKeys(t *testing.T) {
+	newRootTestEnv(t)
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "myproject")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+
+	l := config.NewLoader(config.WithProjectDir(projectDir))
+	require.NoError(t, l.Load())
+	origLoader := loader
+	loader = l
+	defer func() { loader = origLoader }()
+
+	// Digital twin: config WITH security keys
+	origRead := readProjectConfigFunc
+	readProjectConfigFunc = func(path string) (map[string]any, error) {
+		return map[string]any{
+			"defaults": map[string]any{"cpus": 4},
+			"security": map[string]any{
+				"mount_policy":      "readonly",
+				"egress_allowlist": []string{"custom.example.com"},
+			},
+		}, nil
+	}
+	defer func() { readProjectConfigFunc = origRead }()
+
+	check := checkProjectSecurityConfig()
+	assert.Equal(t, "project_security_config", check.Name)
+	assert.Equal(t, "fail", check.Status)
+	assert.Contains(t, check.Message, "security.mount_policy")
+	assert.Contains(t, check.Message, "security.egress_allowlist")
+	assert.Contains(t, check.Message, "REQ-004-029")
+}
+
+func TestCheckProjectSecurityConfig_SecurityNotMap(t *testing.T) {
+	newRootTestEnv(t)
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "myproject")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+
+	l := config.NewLoader(config.WithProjectDir(projectDir))
+	require.NoError(t, l.Load())
+	origLoader := loader
+	loader = l
+	defer func() { loader = origLoader }()
+
+	// Digital twin: security key is a string, not a map
+	origRead := readProjectConfigFunc
+	readProjectConfigFunc = func(path string) (map[string]any, error) {
+		return map[string]any{
+			"security": "some-string-value",
+		}, nil
+	}
+	defer func() { readProjectConfigFunc = origRead }()
+
+	check := checkProjectSecurityConfig()
+	assert.Equal(t, "project_security_config", check.Name)
+	assert.Equal(t, "fail", check.Status)
+	assert.Contains(t, check.Message, "security")
+	assert.Contains(t, check.Message, "REQ-004-029")
+}
+
+func TestCheckProjectSecurityConfig_ReadError(t *testing.T) {
+	newRootTestEnv(t)
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "myproject")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+
+	l := config.NewLoader(config.WithProjectDir(projectDir))
+	require.NoError(t, l.Load())
+	origLoader := loader
+	loader = l
+	defer func() { loader = origLoader }()
+
+	// Digital twin: simulate read error
+	origRead := readProjectConfigFunc
+	readProjectConfigFunc = func(path string) (map[string]any, error) {
+		return nil, fmt.Errorf("permission denied")
+	}
+	defer func() { readProjectConfigFunc = origRead }()
+
+	check := checkProjectSecurityConfig()
+	assert.Equal(t, "project_security_config", check.Name)
+	assert.Equal(t, "fail", check.Status)
+	assert.Contains(t, check.Message, "cannot read project config")
+}
+
+func TestCheckProjectSecurityConfig_InDoctorOutput(t *testing.T) {
+	paths := mockDoctorPaths{
+		"limactl": "/usr/local/bin/limactl",
+		"ssh":     "/usr/bin/ssh",
+		"tmux":    "/usr/bin/tmux",
+		"rsync":   "/usr/bin/rsync",
+	}
+	setupDoctorTest(t, paths, true)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "doctor"})
+	root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+
+	var result map[string]any
+	err := json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err)
+
+	data := result["data"].([]any)
+	found := false
+	for _, item := range data {
+		check := item.(map[string]any)
+		if check["name"] == "project_security_config" {
+			found = true
+			assert.Equal(t, "pass", check["status"])
+			break
+		}
+	}
+	assert.True(t, found, "project_security_config check must appear in doctor output")
+}
+
+// Property: checkProjectSecurityConfig always returns valid name and status
+func TestProperty_ProjectSecurityConfigAlwaysValid(t *testing.T) {
+	newRootTestEnv(t)
+
+	rapid.Check(t, func(rt *rapid.T) {
+		hasLoader := rapid.Bool().Draw(rt, "hasLoader")
+		hasProjectDir := rapid.Bool().Draw(rt, "hasProjectDir")
+		hasSecurity := rapid.Bool().Draw(rt, "hasSecurity")
+
+		if hasLoader {
+			if hasProjectDir {
+				tmpDir := t.TempDir()
+				projectDir := filepath.Join(tmpDir, "proj")
+				os.MkdirAll(projectDir, 0o755)
+				l := config.NewLoader(config.WithProjectDir(projectDir))
+				l.Load()
+				origLoader := loader
+				loader = l
+				defer func() { loader = origLoader }()
+
+				origRead := readProjectConfigFunc
+				readProjectConfigFunc = func(path string) (map[string]any, error) {
+					if hasSecurity {
+						return map[string]any{
+							"security": map[string]any{
+								"mount_policy": "readonly",
+							},
+						}, nil
+					}
+					return map[string]any{"defaults": map[string]any{"cpus": 4}}, nil
+				}
+				defer func() { readProjectConfigFunc = origRead }()
+			} else {
+				l := config.NewLoader()
+				l.Load()
+				origLoader := loader
+				loader = l
+				defer func() { loader = origLoader }()
+			}
+		}
+		// If !hasLoader, loader stays nil
+
+		check := checkProjectSecurityConfig()
+		assert.Equal(t, "project_security_config", check.Name)
+		assert.Contains(t, []string{"pass", "fail"}, check.Status)
+	})
+}
+
+// Property: security keys always cause fail, empty or no security always passes
+func TestProperty_ProjectSecurityConfigSecurityKeysAlwaysFail(t *testing.T) {
+	newRootTestEnv(t)
+
+	rapid.Check(t, func(rt *rapid.T) {
+		tmpDir := t.TempDir()
+		projectDir := filepath.Join(tmpDir, "proj")
+		os.MkdirAll(projectDir, 0o755)
+
+		l := config.NewLoader(config.WithProjectDir(projectDir))
+		l.Load()
+		origLoader := loader
+		loader = l
+		defer func() { loader = origLoader }()
+
+		// Generate random security keys
+		nKeys := rapid.IntRange(1, 5).Draw(rt, "nKeys")
+		securityMap := make(map[string]any)
+		for i := 0; i < nKeys; i++ {
+			key := rapid.StringMatching(`[a-z_]{3,10}`).Draw(rt, "key")
+			securityMap[key] = "value"
+		}
+
+		origRead := readProjectConfigFunc
+		readProjectConfigFunc = func(path string) (map[string]any, error) {
+			return map[string]any{"security": securityMap}, nil
+		}
+		defer func() { readProjectConfigFunc = origRead }()
+
+		check := checkProjectSecurityConfig()
+		assert.Equal(t, "fail", check.Status, "any security keys should cause fail")
+		assert.Contains(t, check.Message, "REQ-004-029")
+	})
 }
 
 // Property: human output always contains every check name

@@ -623,3 +623,12 @@ REQ-007-005: Implemented VSOCK/TCP transport detection in SSHConfig.
   - Unit tests: MergedSensitivePaths empty/multiple/expand-home/clean-paths/builtins-always-present, ValidateMountPath with merged extra paths (exact + children rejected), SensitivePathEntry JSON serialization
   - Property tests: merged always contains all defaults (100), source consistency (100), extra paths never reduce protection (100), user-configured paths always reject themselves (100), JSON round-trip lossless (100), merged never nil (100), empty extra equals builtin count (100)
 - Updated `internal/cmd/config_test.go`: Added `security.sensitive_paths` to `TestIsKnownConfigKey`
+
+### Doctor project security config check (REQ-004-029) -- tests added
+REQ-004-029: `sd doctor` warns if a project-level `.sd/config.yaml` contains any `security.*` keys.
+The `checkProjectSecurityConfig()` function and `readProjectConfigFunc` injectable were already implemented.
+Added comprehensive tests:
+- Unit tests: NoLoader (pass), NoProjectDir (pass), NoConfigFile (pass via digital twin), NoSecurityKeys (pass), HasSecurityKeys (fail with key listing + REQ-004-029), SecurityNotMap (fail), ReadError (fail), InDoctorOutput (integration in JSON output)
+- Property tests: always returns valid name and status (100 cases), security keys always fail (100 cases)
+- Fixed existing test check counts from 7 to 8
+
