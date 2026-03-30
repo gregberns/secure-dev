@@ -366,8 +366,18 @@ Still missing: security status, diff, config egress.
   - Property tests: rsync args always start with -avz (100), dry-run always includes flags (100), normal run never includes flags (100), sshTarget always has user+path (100), transport correctness (100), args always end with src/dst (100), stopped VM never calls rsync (100), nonexistent VM never calls rsync (100), cancelled context always fails with "cancelled" (100, all 3 ops)
   - Digital twin: `rsyncRecorder` mock recording calls, injectable via `rsyncRun` override
 
-### No Cloner implementation
-REQ-003-009: Interface defined but no backend implements it.
+### Cloner implementation in Lima backend (REQ-003-009)
+- `internal/backend/lima/lima.go`: `Clone(ctx, src, dst)` method on `limaBackend` implementing `backend.Cloner`
+- Validates source and destination names are non-empty
+- Checks source VM exists via Status; checks destination doesn't already exist
+- Runs `limactl clone <src> <dst>` through executor
+- Maps errors: not found -> ErrVMNotFound, already exists -> ErrVMAlreadyExists
+- Context cancellation supported
+- `internal/backend/lima/mocklimactl/mocklimactl.go`: Added `cloneVM` command to digital twin
+  - Deep copies source VM state with new name, stopped status, fresh timestamps, empty snapshots
+- `internal/backend/lima/clone_test.go` (15 tests):
+  - Unit tests: success, independent lifecycle (start clone, verify source unaffected, destroy source, verify clone OK), same config inherited, source not found, destination already exists, clone of clone, many clones (5 from same source), empty names (src and dst), context cancelled, running source (clone succeeds, clone is stopped, source still running), Cloner interface assertion
+  - Property tests: clone always creates independent VM (100), clone nonexistent source always ErrVMNotFound (100), clone to existing name always ErrVMAlreadyExists (100), cancelled context always fails with "cancelled" (100)
 
 ### No iptables/egress implementation
 REQ-004-009: Egress control is policy-level only.

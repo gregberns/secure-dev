@@ -77,6 +77,8 @@ func MockRun(args []string) (string, error) {
 		return execShell(cmdArgs...)
 	case "snapshot":
 		return snapshotCmd(cmdArgs...)
+	case "clone":
+		return cloneVM(cmdArgs...)
 	default:
 		return "", fmt.Errorf("mocklimactl: unknown command %q", cmd)
 	}
@@ -508,6 +510,41 @@ func deleteSnapshot(args ...string) (string, error) {
 	}
 
 	return "", fmt.Errorf("snapshot %q not found for VM %q", tag, name)
+}
+
+// cloneVM creates a copy of an existing VM with a new name.
+// REQ-003-009: Cloner digital twin
+func cloneVM(args ...string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: mocklimactl clone <src> <dst>")
+	}
+	src := args[0]
+	dst := args[1]
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	srcVM, exists := state[src]
+	if !exists {
+		return "", fmt.Errorf("vm %q not found", src)
+	}
+
+	if _, exists := state[dst]; exists {
+		return "", fmt.Errorf("vm %q already exists", dst)
+	}
+
+	// Deep copy the source VM state
+	cloned := &VMState{
+		Name:      dst,
+		Status:    "stopped",
+		VMType:    srcVM.VMType,
+		Config:    srcVM.Config,
+		CreatedAt: time.Now(),
+		Snapshots: make([]Snapshot, 0),
+	}
+
+	state[dst] = cloned
+	return fmt.Sprintf("Cloned VM %q from %q", dst, src), nil
 }
 
 // Save persists VM state to disk for testing persistence.

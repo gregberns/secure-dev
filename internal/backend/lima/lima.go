@@ -662,6 +662,45 @@ func parseSnapshotList(output string) ([]backend.SnapshotInfo, error) {
 	return result, nil
 }
 
+// --- REQ-003-009: Cloner Interface ---
+
+// Clone creates a new VM that is a copy of an existing VM.
+// REQ-003-009
+func (b *limaBackend) Clone(ctx context.Context, src, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("clone cancelled: %w", err)
+	}
+
+	if src == "" || dst == "" {
+		return fmt.Errorf("source and destination names must not be empty: %w", backend.ErrInvalidConfig)
+	}
+
+	// Verify source VM exists
+	if _, err := b.Status(ctx, src); err != nil {
+		return fmt.Errorf("clone failed: %w", err)
+	}
+
+	// Verify destination doesn't already exist
+	status, _ := b.Status(ctx, dst)
+	if status != "" {
+		return fmt.Errorf("vm %q already exists: %w", dst, backend.ErrVMAlreadyExists)
+	}
+
+	// Clone via limactl
+	_, err := b.executor.Run("limactl", "clone", src, dst)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("vm %q not found: %w", src, backend.ErrVMNotFound)
+		}
+		if strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("vm %q already exists: %w", dst, backend.ErrVMAlreadyExists)
+		}
+		return fmt.Errorf("failed to clone vm %q to %q: %w", src, dst, err)
+	}
+
+	return nil
+}
+
 // --- REQ-003-010, REQ-007-017: Syncer Interface ---
 
 // rsyncRun executes an rsync command. Injectable for testing.
