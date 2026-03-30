@@ -149,7 +149,7 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
   - Digital twin: `mockProvisionBackend` recording Exec calls with configurable results/errors
   - `captureStdout` helper using `os.Pipe()` for stdout capture
 
-Still missing: security status, diff, config egress.
+Still missing: security status, diff.
 
 ### Token command implemented (REQ-002-008, REQ-004-012, REQ-004-015)
 - `internal/cmd/token.go` with `sd token` parent command and 4 subcommands:
@@ -532,3 +532,26 @@ REQ-007-005: Implemented VSOCK/TCP transport detection in SSHConfig.
 - mocklimactl updated with VMType field for testing both transports
 - Tests: unit tests (VSOCK/TCP/transport-always-set), property tests (VSOCK has ProxyCommand, TCP has port, transport always valid), integration test updated, connect command VSOCK test enhanced
 - `isVSOCKTransport` variable allows test override of transport detection
+
+### Config egress command implemented (REQ-002-005, REQ-004-008)
+- `internal/cmd/config_egress.go` with `sd config egress` parent and 3 subcommands:
+  - `sd config egress add <vm> <domain>` -- add a domain to a VM's egress allowlist
+  - `sd config egress remove <vm> <domain>` -- remove a domain from a VM's egress allowlist
+  - `sd config egress list <vm>` -- list effective egress allowlist (defaults + user-added)
+- Human output: confirmation messages for add/remove, tab-formatted table for list (DOMAIN + SOURCE columns)
+- JSON output: `{"ok": true, "data": {"vm": ..., "domain": ..., "action": "added"|"removed"}}` for add/remove, `{"ok": true, "data": [{"domain": ..., "source": "default"|"user"}, ...]}` for list
+- Domain validation via `security.ValidateEgressDomain` (empty, dot-prefix, consecutive dots, invalid wildcards rejected)
+- Default domains cannot be removed (returns `invalid_argument`)
+- Duplicate domains rejected (case-insensitive)
+- User-added domains stored in VM config file at `$SD_HOME/vms/<name>/config.yaml` under `egress_allowlist` key
+- Merges user-added with built-in defaults via `security.BuildEgressList`
+- Error codes: `invalid_argument`, `egress_update_failed`, `egress_query_failed`, `config_not_loaded`
+- Injectable `readVMEgressFunc` and `writeVMEgressFunc` for digital twin testing
+- `egressTestState` digital twin with thread-safe mutex tracking reads/writes
+- Tests in `internal/cmd/config_egress_test.go` (29 tests):
+  - Registration: command registered with add/remove/list subcommands, no GroupID
+  - Add: human output, JSON output, already user-added, already default, invalid domain (empty + dot prefix), empty VM, missing args, write error, multiple sequential adds, case insensitive duplicate detection
+  - Remove: human output, JSON output, default domain rejection, not found, empty VM, missing args, write error, removes last clears list, case insensitive match
+  - List: human output (table with defaults + user), JSON output (source field per entry), no user domains (only defaults), empty VM, missing args, read error
+  - Round-trip: full add -> list -> remove lifecycle
+  - Property tests: add JSON always valid (5 cases), remove JSON always valid (3 cases), list JSON always valid (3 cases), error codes snake_case (8 cases), list contains all defaults (3 runs), add calls write once (3 VMs), list JSON required fields (domain + source)
