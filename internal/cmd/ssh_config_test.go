@@ -529,7 +529,7 @@ func TestProperty_SSHConfigJSONAlwaysValid(t *testing.T) {
 
 // Property: human output always contains the VM name in the Host line.
 func TestProperty_SSHConfigHumanContainsHostLine(t *testing.T) {
-	names := []string{"myvm", "test-vm", "vm_123", "production"}
+	names := []string{"myvm", "test-vm", "vm-123", "production"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			mb := &mockSSHConfigBackend{

@@ -51,6 +51,14 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	// REQ-002-003: --force is required for non-interactive use
 	force, _ := cmd.Flags().GetBool("force")
 	if !force {

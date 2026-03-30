@@ -71,6 +71,14 @@ func runProvision(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	// Resolve backend
 	backendName := ""
 	if Loader() != nil {

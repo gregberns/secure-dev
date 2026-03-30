@@ -388,7 +388,7 @@ func TestProperty_StartJSONAlwaysValid(t *testing.T) {
 
 // Property: human output always mentions the VM name.
 func TestProperty_StartHumanOutputContainsName(t *testing.T) {
-	names := []string{"alpha", "beta", "gamma", "vm-with-dash", "vm_with_underscore"}
+	names := []string{"alpha", "beta", "gamma", "vm-with-dash", "vm-with-mixed-1"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			mb := &mockStartBackend{

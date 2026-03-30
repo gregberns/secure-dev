@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"sd/internal/backend"
 	"sd/internal/security"
 	"sd/internal/ui"
 )
@@ -230,6 +231,14 @@ func runTokenRotate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(vmName); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	sdHome := ""
 	if l := Loader(); l != nil {
 		sdHome = l.SDHome()
@@ -323,6 +332,14 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(vmName); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	sdHome := ""
 	if l := Loader(); l != nil {
 		sdHome = l.SDHome()
@@ -397,6 +414,14 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 		return ui.CLIError{
 			Code:    "invalid_argument",
 			Message: "VM name cannot be empty",
+		}
+	}
+
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(vmName); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
 		}
 	}
 

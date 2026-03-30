@@ -128,6 +128,14 @@ func runSnapshotCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	tag, _ := cmd.Flags().GetString("tag")
 	if tag == "" {
 		return ui.CLIError{
@@ -184,6 +192,14 @@ func runSnapshotList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	_, s, err := resolveSnapshotBackend()
 	if err != nil {
 		return err
@@ -225,6 +241,14 @@ func runSnapshotRestore(cmd *cobra.Command, args []string) error {
 		return ui.CLIError{
 			Code:    "invalid_argument",
 			Message: "VM name must not be empty",
+		}
+	}
+
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
 		}
 	}
 
@@ -287,6 +311,14 @@ func runSnapshotDelete(cmd *cobra.Command, args []string) error {
 		return ui.CLIError{
 			Code:    "invalid_argument",
 			Message: "VM name must not be empty",
+		}
+	}
+
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
 		}
 	}
 

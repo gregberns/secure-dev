@@ -27,4 +27,8 @@ var (
 
 	// ErrInvalidConfig is returned when VMConfig fails validation.
 	ErrInvalidConfig = errors.New("invalid vm config")
+
+	// ErrInvalidVMName is returned when a VM name fails validation.
+	// REQ-001-006: names must match ^[a-z][a-z0-9-]{0,62}$
+	ErrInvalidVMName = errors.New("invalid vm name")
 )

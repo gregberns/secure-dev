@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"sd/internal/backend"
 	"sd/internal/config"
 	"sd/internal/security"
 	"sd/internal/ui"
@@ -178,6 +179,14 @@ func runConfigEgressAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(vmName); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	// Validate domain format
 	if err := security.ValidateEgressDomain(domain); err != nil {
 		return ui.CLIError{
@@ -269,6 +278,14 @@ func runConfigEgressRemove(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(vmName); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	// Check if trying to remove a default domain
 	normalized := strings.ToLower(strings.TrimSpace(domain))
 	for _, def := range config.DefaultEgressAllowlist {
@@ -354,6 +371,14 @@ func runConfigEgressList(cmd *cobra.Command, args []string) error {
 		return ui.CLIError{
 			Code:    "invalid_argument",
 			Message: "VM name cannot be empty",
+		}
+	}
+
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(vmName); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
 		}
 	}
 

@@ -99,6 +99,26 @@ type VMConfig struct {
 // REQ-003-011: Memory and Disk must use <number><unit> format.
 var resourceSizePattern = regexp.MustCompile(`^[0-9]+([KMGT]i?B?)$`)
 
+// vmNamePattern matches valid VM names.
+// REQ-001-006: names must start with a lowercase letter, followed by lowercase
+// letters, digits, or hyphens, total length 1-63 characters.
+var vmNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+// ValidateVMName checks that a VM name meets the naming requirements.
+// REQ-001-006: VM names are validated against ^[a-z][a-z0-9-]{0,62}$
+func ValidateVMName(name string) error {
+	if name == "" {
+		return wrapError(ErrInvalidVMName, "name must not be empty")
+	}
+	if len(name) > 63 {
+		return wrapError(ErrInvalidVMName, fmt.Sprintf("name %q exceeds maximum length of 63 characters (got %d)", name, len(name)))
+	}
+	if !vmNamePattern.MatchString(name) {
+		return wrapError(ErrInvalidVMName, fmt.Sprintf("name %q must match ^[a-z][a-z0-9-]{0,62}$ (start with lowercase letter, contain only lowercase letters, digits, and hyphens)", name))
+	}
+	return nil
+}
+
 // Validate checks if the VMConfig is valid according to backend rules.
 // REQ-003-021: Error handling
 func (cfg *VMConfig) Validate() error {

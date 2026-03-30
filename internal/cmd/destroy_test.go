@@ -329,7 +329,7 @@ func TestProperty_DestroyJSONAlwaysValid(t *testing.T) {
 
 // Property: human output always mentions the VM name.
 func TestProperty_DestroyHumanOutputContainsName(t *testing.T) {
-	names := []string{"alpha", "beta", "gamma", "vm-with-dash", "vm_with_underscore"}
+	names := []string{"alpha", "beta", "gamma", "vm-with-dash", "vm-with-mixed-1"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			mb := &mockDestroyBackend{name: "mock", available: true}

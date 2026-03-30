@@ -77,6 +77,15 @@ func runSyncTo(cmd *cobra.Command, args []string) error {
 			Message: "VM name must not be empty",
 		}
 	}
+
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	if hostPath == "" {
 		return ui.CLIError{
 			Code:    "invalid_argument",
@@ -170,6 +179,15 @@ func runSyncFrom(cmd *cobra.Command, args []string) error {
 			Message: "VM name must not be empty",
 		}
 	}
+
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	if guestPath == "" {
 		return ui.CLIError{
 			Code:    "invalid_argument",

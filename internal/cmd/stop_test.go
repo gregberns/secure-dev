@@ -436,7 +436,7 @@ func TestProperty_StopJSONAlwaysValid(t *testing.T) {
 
 // Property: human output always mentions the VM name (when stopping a running VM).
 func TestProperty_StopHumanOutputContainsName(t *testing.T) {
-	names := []string{"alpha", "beta", "gamma", "vm-with-dash", "vm_with_underscore"}
+	names := []string{"alpha", "beta", "gamma", "vm-with-dash", "vm-with-mixed-1"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			mb := &mockStopBackend{

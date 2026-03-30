@@ -151,6 +151,22 @@ REQ-002-001, REQ-002-010, REQ-002-014, REQ-002-015, REQ-002-018, REQ-002-019:
 
 Still missing: security status, diff.
 
+### VM name validation implemented (REQ-001-006)
+- `internal/backend/config.go`: Added `ValidateVMName(name string) error` function
+  - Validates names against pattern `^[a-z][a-z0-9-]{0,62}$` per spec
+  - Checks for empty, max length (63 chars), and format compliance
+  - Returns `ErrInvalidVMName` sentinel error wrapped with actionable message
+- `internal/backend/errors.go`: Added `ErrInvalidVMName` sentinel error
+- Wired into all commands that accept VM names:
+  - create, start, stop, destroy, connect, exec, provision
+  - ssh-config, sync to/from, snapshot create/list/restore/delete
+  - diff, security status, token rotate/revoke/list
+  - config egress add/remove/list
+- Updated test data: replaced invalid VM names (`vm_with_underscore`, `vm_123`) with valid names (`vm-with-mixed-1`, `vm-123`) in 6 test files
+- Tests in `internal/backend/config_test.go` (27 new tests):
+  - Unit tests: 9 valid names, 10 invalid names, 3 error message checks
+  - Property tests: valid names always pass (100), digit start always fails (100), uppercase always fails (100), too long always fails (100), empty always fails, max length always passes (100), invalid chars always fail (100)
+
 ### Token command implemented (REQ-002-008, REQ-004-012, REQ-004-015)
 - `internal/cmd/token.go` with `sd token` parent command and 4 subcommands:
   - `sd token github setup` -- show guidance for creating a fine-grained GitHub PAT (REQ-004-012)

@@ -112,6 +112,14 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-006: validate VM name format
+	if err := backend.ValidateVMName(name); err != nil {
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: err.Error(),
+		}
+	}
+
 	// REQ-007-012: --no-tmux and --new-window are mutually exclusive
 	noTmux, _ := cmd.Flags().GetBool("no-tmux")
 	newWindow, _ := cmd.Flags().GetBool("new-window")
