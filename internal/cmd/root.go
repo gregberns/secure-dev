@@ -60,7 +60,7 @@ credential injection, and session management.`,
 				"version": true, "help": true, "completion": true,
 				"doctor": true, "list": true, "status": true,
 				"connect": true, "ssh-config": true, "sync": true,
-				"audit": true, "config": true, "provision": true,
+				"audit": true, "config": true, "provision": true, "security": true,
 				"logs": true, "token": true,
 			}
 			for c := cmd; c != nil; c = c.Parent() {
