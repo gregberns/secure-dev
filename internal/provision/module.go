@@ -222,6 +222,8 @@ func isValidModuleName(name string) bool {
 var BuiltinModuleNames = []string{
 	"base",
 	"ssh-hardening",
+	"dns-filter",
+	"egress",
 	"claude-code",
 	"docker",
 	"golang",

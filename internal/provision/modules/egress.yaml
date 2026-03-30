@@ -1,0 +1,75 @@
+name: egress
+description: "Default-deny egress firewall (iptables): blocks all outbound traffic except allowlisted destinations and SSH"
+depends_on:
+  - base
+  - dns-filter
+scripts:
+  - mode: system
+    script: |
+      # REQ-004-006: Default-deny outbound network policy
+      # REQ-004-009: Egress implementation via iptables
+      # Only traffic to explicitly allowlisted destinations is permitted.
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get install -y --no-install-recommends iptables iptables-persistent
+      # Flush existing sd-egress chain if present (idempotent re-provisioning)
+      iptables -F sd-egress 2>/dev/null || true
+      iptables -D OUTPUT -j sd-egress 2>/dev/null || true
+      iptables -X sd-egress 2>/dev/null || true
+      # Create dedicated chain for manageability
+      iptables -N sd-egress
+      iptables -A OUTPUT -j sd-egress
+      # Allow loopback
+      iptables -A sd-egress -o lo -j ACCEPT
+      # Allow established connections (response traffic)
+      iptables -A sd-egress -m state --state ESTABLISHED,RELATED -j ACCEPT
+      # Allow DNS to local filtering resolver ONLY (REQ-004-025)
+      # dnsmasq listens on 127.0.0.1:53
+      iptables -A sd-egress -p udp --dport 53 -d 127.0.0.1 -j ACCEPT
+      iptables -A sd-egress -p tcp --dport 53 -d 127.0.0.1 -j ACCEPT
+      # Allow dnsmasq to reach upstream DNS server
+      UPSTREAM_DNS=$(grep -m1 '^nameserver' /etc/resolv.conf.bak.sd 2>/dev/null | awk '{print $2}')
+      if [ -n "$UPSTREAM_DNS" ]; then
+        iptables -A sd-egress -p udp --dport 53 -d "$UPSTREAM_DNS" -j ACCEPT
+        iptables -A sd-egress -p tcp --dport 53 -d "$UPSTREAM_DNS" -j ACCEPT
+      fi
+      # Block DNS to all other resolvers
+      iptables -A sd-egress -p udp --dport 53 -j DROP
+      iptables -A sd-egress -p tcp --dport 53 -j DROP
+      # Block DNS-over-TLS (port 853) unless destination is on allowlist
+      # REQ-004-025: Prevent DNS exfiltration via TLS
+      iptables -A sd-egress -p tcp --dport 853 -j DROP
+      # Block DNS-over-HTTPS to known DoH providers (REQ-004-025)
+      iptables -A sd-egress -p tcp --dport 443 -d 8.8.8.8 -j DROP
+      iptables -A sd-egress -p tcp --dport 443 -d 8.8.4.4 -j DROP
+      iptables -A sd-egress -p tcp --dport 443 -d 1.1.1.1 -j DROP
+      iptables -A sd-egress -p tcp --dport 443 -d 1.0.0.1 -j DROP
+      iptables -A sd-egress -p tcp --dport 443 -d 9.9.9.9 -j DROP
+      iptables -A sd-egress -p tcp --dport 443 -d 149.112.112.112 -j DROP
+      # Allow SSH from host (required for sd operation)
+      # SSH traffic from the host uses source port from the host side
+      iptables -A sd-egress -p tcp --sport 22 -j ACCEPT
+      # Per-domain ACCEPT rules: resolve default egress allowlist and add rules
+      # REQ-004-007: Default egress allowlist
+      # Wait briefly for dnsmasq to be ready
+      sleep 2
+      for domain in api.anthropic.com github.com archive.ubuntu.com security.ubuntu.com deb.debian.org registry.npmjs.org pypi.org files.pythonhosted.org proxy.golang.org sum.golang.org; do
+        for ip in $(dig +short "$domain" @127.0.0.1 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
+          iptables -A sd-egress -d "$ip" -j ACCEPT
+        done
+      done
+      # Resolve common subdomains for wildcard patterns
+      for domain in raw.githubusercontent.com objects.githubusercontent.com; do
+        for ip in $(dig +short "$domain" @127.0.0.1 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
+          iptables -A sd-egress -d "$ip" -j ACCEPT
+        done
+      done
+      # Default deny all other outbound traffic
+      iptables -A sd-egress -j DROP
+      # Persist iptables rules across reboots
+      if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+      fi
+probe:
+  command: "iptables -L sd-egress -n 2>/dev/null | grep -q 'sd-egress'"
+  interval: 5s
+  timeout: 30s

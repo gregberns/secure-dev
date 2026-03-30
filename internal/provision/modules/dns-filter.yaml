@@ -1,0 +1,71 @@
+name: dns-filter
+description: "Local filtering DNS resolver (dnsmasq): resolves only egress-allowlisted domains, blocks DNS exfiltration"
+depends_on:
+  - base
+scripts:
+  - mode: system
+    script: |
+      # REQ-004-025: Local filtering DNS resolver
+      # Only resolves domains present on the egress allowlist.
+      # DNS queries for non-allowlisted domains return NXDOMAIN,
+      # preventing DNS-based data exfiltration.
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get install -y --no-install-recommends dnsmasq
+      # Stop dnsmasq before reconfiguring
+      systemctl stop dnsmasq 2>/dev/null || true
+      # Capture upstream DNS before overwriting resolv.conf
+      UPSTREAM_DNS=$(grep -m1 '^nameserver' /etc/resolv.conf | awk '{print $2}')
+      if [ -z "$UPSTREAM_DNS" ]; then
+        UPSTREAM_DNS="8.8.8.8"
+      fi
+      # Create sd-specific dnsmasq configuration
+      mkdir -p /etc/dnsmasq.d
+      cat > /etc/dnsmasq.d/sd-egress.conf << DNSMASQ_CONF
+      # Managed by sd (secure-dev) -- do not edit
+      # REQ-004-025: Local filtering DNS resolver
+
+      # Listen only on loopback
+      listen-address=127.0.0.1
+      bind-interfaces
+
+      # Never use /etc/resolv.conf (we control it)
+      no-resolv
+
+      # Default: return NXDOMAIN for all queries not explicitly forwarded.
+      # Domains without an explicit server= entry will not be resolved.
+      # This blocks DNS-based data exfiltration.
+
+      # Forward queries for default egress allowlisted domains (REQ-004-007)
+      server=/api.anthropic.com/$UPSTREAM_DNS
+      server=/github.com/$UPSTREAM_DNS
+      server=/githubusercontent.com/$UPSTREAM_DNS
+      server=/archive.ubuntu.com/$UPSTREAM_DNS
+      server=/security.ubuntu.com/$UPSTREAM_DNS
+      server=/deb.debian.org/$UPSTREAM_DNS
+      server=/registry.npmjs.org/$UPSTREAM_DNS
+      server=/pypi.org/$UPSTREAM_DNS
+      server=/files.pythonhosted.org/$UPSTREAM_DNS
+      server=/proxy.golang.org/$UPSTREAM_DNS
+      server=/sum.golang.org/$UPSTREAM_DNS
+
+      # Log DNS queries for audit trail
+      log-queries
+      log-facility=/var/log/dnsmasq.log
+      DNSMASQ_CONF
+      chmod 644 /etc/dnsmasq.d/sd-egress.conf
+      # Configure /etc/resolv.conf to use local resolver only
+      cp /etc/resolv.conf /etc/resolv.conf.bak.sd
+      echo "nameserver 127.0.0.1" > /etc/resolv.conf
+      # Prevent DHCP or other services from overwriting resolv.conf
+      chattr +i /etc/resolv.conf 2>/dev/null || true
+      # Start dnsmasq
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable dnsmasq 2>/dev/null || true
+        systemctl start dnsmasq 2>/dev/null || dnsmasq
+      else
+        dnsmasq
+      fi
+probe:
+  command: "dig +short @127.0.0.1 api.anthropic.com 2>/dev/null | grep -q ."
+  interval: 5s
+  timeout: 30s

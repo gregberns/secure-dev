@@ -21,13 +21,13 @@ func TestLoadBuiltinModules_AllPresent(t *testing.T) {
 	for i, m := range modules {
 		names[i] = m.Name
 	}
-	assert.Equal(t, BuiltinModuleNames, names, "all 8 built-in modules must be present in canonical order")
+	assert.Equal(t, BuiltinModuleNames, names, "all 10 built-in modules must be present in canonical order")
 }
 
 func TestLoadBuiltinModules_Count(t *testing.T) {
 	modules, err := LoadBuiltinModules()
 	require.NoError(t, err)
-	assert.Len(t, modules, 8, "REQ-006-001 specifies exactly 8 built-in modules")
+	assert.Len(t, modules, 10, "REQ-006-001 specifies exactly 10 built-in modules")
 }
 
 func TestLoadBuiltinModules_AllValid(t *testing.T) {
@@ -398,6 +398,299 @@ func TestLoadBuiltinModules_ScriptModes(t *testing.T) {
 	}
 }
 
+// --- REQ-004-025: DNS Filter Module Tests ---
+
+func TestLoadBuiltinModules_DnsFilterConfiguresDnsmasq(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var dnsFilter *Module
+	for i := range modules {
+		if modules[i].Name == "dns-filter" {
+			dnsFilter = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, dnsFilter)
+
+	allScripts := ""
+	for _, s := range dnsFilter.Scripts {
+		allScripts += s.Script + " "
+	}
+
+	assert.Contains(t, allScripts, "dnsmasq", "dns-filter must install dnsmasq")
+	assert.Contains(t, allScripts, "listen-address=127.0.0.1",
+		"dnsmasq must listen on 127.0.0.1 only (REQ-004-025)")
+	assert.Contains(t, allScripts, "bind-interfaces",
+		"dnsmasq must bind to specific interfaces (REQ-004-025)")
+	assert.Contains(t, allScripts, "no-resolv",
+		"dnsmasq must not use /etc/resolv.conf for upstream (REQ-004-025)")
+
+	defaultDomains := []string{
+		"api.anthropic.com", "github.com", "githubusercontent.com",
+		"archive.ubuntu.com", "security.ubuntu.com", "deb.debian.org",
+		"registry.npmjs.org", "pypi.org", "files.pythonhosted.org",
+		"proxy.golang.org", "sum.golang.org",
+	}
+	for _, domain := range defaultDomains {
+		assert.Contains(t, allScripts, "server=/"+domain+"/",
+			"dns-filter must forward %q to upstream DNS (REQ-004-007)", domain)
+	}
+	assert.Contains(t, allScripts, "nameserver 127.0.0.1",
+		"/etc/resolv.conf must point to local resolver (REQ-004-025)")
+	assert.Contains(t, allScripts, "log-queries",
+		"dnsmasq must log DNS queries for audit trail (REQ-004-025)")
+}
+
+func TestLoadBuiltinModules_DnsFilterSystemMode(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var dnsFilter *Module
+	for i := range modules {
+		if modules[i].Name == "dns-filter" {
+			dnsFilter = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, dnsFilter)
+	assert.Len(t, dnsFilter.Scripts, 1)
+	assert.Equal(t, ModeSystem, dnsFilter.Scripts[0].Mode, "dns-filter must run as system mode")
+}
+
+func TestLoadBuiltinModules_DnsFilterDependsOnBase(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var dnsFilter *Module
+	for i := range modules {
+		if modules[i].Name == "dns-filter" {
+			dnsFilter = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, dnsFilter)
+	assert.Contains(t, dnsFilter.DependsOn, "base")
+}
+
+func TestLoadBuiltinModules_DnsFilterHasProbe(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var dnsFilter *Module
+	for i := range modules {
+		if modules[i].Name == "dns-filter" {
+			dnsFilter = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, dnsFilter)
+	assert.NotNil(t, dnsFilter.Probe)
+	assert.Contains(t, dnsFilter.Probe.Command, "127.0.0.1")
+}
+
+func TestLoadBuiltinModules_DnsFilterNoDownloads(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var dnsFilter *Module
+	for i := range modules {
+		if modules[i].Name == "dns-filter" {
+			dnsFilter = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, dnsFilter)
+	assert.False(t, dnsFilter.HasDownloads())
+}
+
+func TestLoadBuiltinModules_DnsFilterCapturesUpstreamDns(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var dnsFilter *Module
+	for i := range modules {
+		if modules[i].Name == "dns-filter" {
+			dnsFilter = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, dnsFilter)
+	allScripts := ""
+	for _, s := range dnsFilter.Scripts {
+		allScripts += s.Script + " "
+	}
+	assert.Contains(t, allScripts, "UPSTREAM_DNS")
+	assert.Contains(t, allScripts, "/etc/resolv.conf")
+}
+
+// --- REQ-004-009: Egress Firewall Module Tests ---
+
+func TestLoadBuiltinModules_EgressConfiguresIptables(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+
+	allScripts := ""
+	for _, s := range egress.Scripts {
+		allScripts += s.Script + " "
+	}
+
+	assert.Contains(t, allScripts, "iptables")
+	assert.Contains(t, allScripts, "sd-egress")
+	assert.Contains(t, allScripts, "iptables -N sd-egress")
+	assert.Contains(t, allScripts, "-o lo -j ACCEPT",
+		"must allow loopback (REQ-004-009)")
+	assert.Contains(t, allScripts, "ESTABLISHED,RELATED",
+		"must allow established connections (REQ-004-009)")
+	assert.Contains(t, allScripts, "--dport 53 -d 127.0.0.1 -j ACCEPT",
+		"must allow DNS to local resolver (REQ-004-025)")
+	assert.Contains(t, allScripts, "--dport 53 -j DROP",
+		"must block external DNS (REQ-004-009)")
+	assert.Contains(t, allScripts, "--dport 853 -j DROP",
+		"must block DNS-over-TLS (REQ-004-025)")
+
+	dohProviders := []string{"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112"}
+	for _, ip := range dohProviders {
+		assert.Contains(t, allScripts, "-d "+ip+" -j DROP",
+			"must block DoH to %s (REQ-004-025)", ip)
+	}
+
+	assert.Contains(t, allScripts, "--sport 22 -j ACCEPT",
+		"must allow SSH from host (REQ-004-009)")
+	assert.Contains(t, allScripts, "-A sd-egress -j DROP",
+		"must have default DROP (REQ-004-006)")
+
+	defaultDomains := []string{
+		"api.anthropic.com", "github.com", "archive.ubuntu.com",
+		"security.ubuntu.com", "deb.debian.org", "registry.npmjs.org",
+		"pypi.org", "files.pythonhosted.org", "proxy.golang.org", "sum.golang.org",
+	}
+	for _, domain := range defaultDomains {
+		assert.Contains(t, allScripts, domain,
+			"must resolve default domain %q (REQ-004-007)", domain)
+	}
+}
+
+func TestLoadBuiltinModules_EgressSystemMode(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	assert.Len(t, egress.Scripts, 1)
+	assert.Equal(t, ModeSystem, egress.Scripts[0].Mode, "egress must run as system mode")
+}
+
+func TestLoadBuiltinModules_EgressDependsOnDnsFilter(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	assert.Contains(t, egress.DependsOn, "base")
+	assert.Contains(t, egress.DependsOn, "dns-filter",
+		"egress must depend on dns-filter (resolver must run before iptables blocks external DNS)")
+}
+
+func TestLoadBuiltinModules_EgressHasProbe(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	assert.NotNil(t, egress.Probe)
+	assert.Contains(t, egress.Probe.Command, "sd-egress")
+}
+
+func TestLoadBuiltinModules_EgressNoDownloads(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	assert.False(t, egress.HasDownloads())
+}
+
+func TestLoadBuiltinModules_EgressResolvesWildcardSubdomains(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	allScripts := ""
+	for _, s := range egress.Scripts {
+		allScripts += s.Script + " "
+	}
+	assert.Contains(t, allScripts, "raw.githubusercontent.com",
+		"must resolve raw.githubusercontent.com for *.githubusercontent.com wildcard")
+}
+
+func TestLoadBuiltinModules_EgressPersistsRules(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	allScripts := ""
+	for _, s := range egress.Scripts {
+		allScripts += s.Script + " "
+	}
+	assert.Contains(t, allScripts, "iptables-save", "must persist rules across reboots")
+}
+
+func TestLoadBuiltinModules_EgressIdempotent(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	allScripts := ""
+	for _, s := range egress.Scripts {
+		allScripts += s.Script + " "
+	}
+	assert.Contains(t, allScripts, "iptables -F sd-egress", "must flush chain for idempotency")
+	assert.Contains(t, allScripts, "iptables -X sd-egress", "must delete chain for idempotency")
+}
+
 func TestLoadBuiltinModules_ResolveAllSucceeds(t *testing.T) {
 	// REQ-006-004: All built-in modules can be resolved together
 	modules, err := LoadBuiltinModules()
@@ -418,6 +711,8 @@ func TestLoadBuiltinModules_ResolveSingleModule(t *testing.T) {
 
 	testCases := []struct{ requested, wantFirst, wantLast string }{
 		{"ssh-hardening", "base", "ssh-hardening"},
+		{"dns-filter", "base", "dns-filter"},
+		{"egress", "base", "egress"},
 		{"golang", "base", "golang"},
 		{"docker", "base", "docker"},
 		{"claude-code", "base", "claude-code"},
@@ -447,8 +742,8 @@ func TestProperty_LoadBuiltinModules_AlwaysSucceeds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadBuiltinModules should never fail: %v", err)
 		}
-		if len(modules) != 8 {
-			t.Fatalf("expected 8 modules, got %d", len(modules))
+		if len(modules) != 10 {
+			t.Fatalf("expected 10 modules, got %d", len(modules))
 		}
 	})
 }

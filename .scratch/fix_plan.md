@@ -399,11 +399,41 @@ Still missing: security status, diff, config egress.
   - Has probe, no downloads
 - Updated test counts from 7 to 8 modules throughout
 
-### No iptables/egress implementation
-REQ-004-009: Egress control is policy-level only.
-
-### No local DNS resolver
-REQ-004-025: DNS filtering resolver not implemented.
+### Egress firewall and DNS filtering modules implemented (REQ-004-009, REQ-004-025)
+- `internal/provision/modules/dns-filter.yaml` with system-mode provisioning script:
+  - Installs dnsmasq as local filtering DNS resolver
+  - Captures upstream DNS from /etc/resolv.conf before overwriting
+  - Configures dnsmasq to listen on 127.0.0.1 only, bind-interfaces, no-resolv
+  - Forwards queries only for default egress allowlisted domains (REQ-004-007)
+  - Points /etc/resolv.conf to 127.0.0.1 as sole nameserver
+  - Locks /etc/resolv.conf with chattr to prevent DHCP overwrites
+  - Logs DNS queries to /var/log/dnsmasq.log for audit trail
+  - Depends on base module
+  - Readiness probe: dig +short @127.0.0.1 api.anthropic.com
+- `internal/provision/modules/egress.yaml` with system-mode provisioning script:
+  - Installs iptables and iptables-persistent
+  - Creates dedicated sd-egress chain for manageability (REQ-004-009)
+  - Idempotent: flushes and recreates chain on re-provision
+  - Allows loopback traffic
+  - Allows established/related connections
+  - Allows DNS to local filtering resolver only (127.0.0.1)
+  - Allows dnsmasq to reach captured upstream DNS server
+  - Blocks DNS to all other resolvers (UDP/TCP port 53)
+  - Blocks DNS-over-TLS (port 853) to all destinations
+  - Blocks DNS-over-HTTPS to known DoH providers (8.8.8.8, 8.8.4.4, 1.1.1.1, 1.0.0.1, 9.9.9.9, 149.112.112.112)
+  - Allows SSH from host (--sport 22)
+  - Resolves all default allowlisted domains via local resolver and adds ACCEPT rules
+  - Resolves common wildcard subdomains (raw.githubusercontent.com, objects.githubusercontent.com)
+  - Default DROP rule for all other outbound traffic (REQ-004-006)
+  - Persists rules via iptables-save for reboot survival
+  - Depends on base and dns-filter modules
+  - Readiness probe: checks sd-egress chain exists via iptables -L
+- Added "dns-filter" and "egress" to BuiltinModuleNames (positioned after ssh-hardening, before app modules)
+- Updated all module count references from 8 to 10 throughout test files
+- Tests in `internal/provision/modules_test.go` (22 new tests):
+  - dns-filter: configures dnsmasq, system mode, depends on base, has probe, no downloads, captures upstream DNS
+  - egress: configures iptables, system mode, depends on dns-filter, has probe, no downloads, resolves wildcards, persists rules, idempotent chain recreation
+  - ResolveSingleModule: added dns-filter and egress test cases
 
 ### SSH host key verification implemented (REQ-004-031, REQ-007-004)
 - `internal/ssh/ssh.go` additions: `KnownHostsPath`, `CaptureHostKey`, `StoreHostKey`, `ReadHostKey`, `VerifyHostKey`, `RemoveSSHDir`
