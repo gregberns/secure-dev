@@ -351,8 +351,23 @@ Still missing: security status, diff, config egress.
   - Property tests: always succeeds (100), all names valid (100), resolve any subset (100), no duplicate names (100), scripts not empty (100)
   - Benchmarks: LoadBuiltinModules, ResolveBuiltinModules
 
-### No Syncer or Cloner implementations
-REQ-003-009, REQ-003-010: Interfaces defined but no backend implements them.
+### Syncer implementation in Lima backend (REQ-003-010, REQ-007-015, REQ-007-016, REQ-007-017)
+- `internal/backend/lima/lima.go` additions: `SyncTo`, `SyncFrom`, `SyncDiff` methods using rsync over SSH
+- Injectable `rsyncRun` variable for digital twin testing (defaults to `exec.Command`)
+- `buildRsyncArgs` constructs rsync args with `-avz`, optional `--dry-run --itemize-changes`, and `-e` SSH wrapper
+- `sshTarget` constructs `user@host:path` (TCP) or `user@localhost:path` (VSOCK) targets
+- TCP transport: uses `-p <port>`, `StrictHostKeyChecking=yes`, per-VM `UserKnownHostsFile`
+- VSOCK transport: uses `ProxyCommand`, `StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`
+- Error mapping: "No such file or directory" and "No route to host" map to `backend.ErrVMNotRunning`
+- Context cancellation checked before SSH config lookup
+- `internal/backend/lima/sync_test.go` with 30 tests:
+  - Unit tests: buildRsyncArgs (TCP, VSOCK, dryRun, normal), sshTarget (TCP, VSOCK)
+  - Integration tests: SyncTo success, SyncFrom success, SyncDiff success, stopped VM, nonexistent VM, rsync errors, VMNotRunning error mapping (No route + No such file), SyncDiff VMNotRunning, SyncDiff rsync error, context cancellation (SyncTo + SyncFrom + SyncDiff), Syncer interface assertion, VSOCK transport
+  - Property tests: rsync args always start with -avz (100), dry-run always includes flags (100), normal run never includes flags (100), sshTarget always has user+path (100), transport correctness (100), args always end with src/dst (100), stopped VM never calls rsync (100), nonexistent VM never calls rsync (100), cancelled context always fails with "cancelled" (100, all 3 ops)
+  - Digital twin: `rsyncRecorder` mock recording calls, injectable via `rsyncRun` override
+
+### No Cloner implementation
+REQ-003-009: Interface defined but no backend implements it.
 
 ### No iptables/egress implementation
 REQ-004-009: Egress control is policy-level only.

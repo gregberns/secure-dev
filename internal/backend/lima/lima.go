@@ -662,5 +662,131 @@ func parseSnapshotList(output string) ([]backend.SnapshotInfo, error) {
 	return result, nil
 }
 
+// --- REQ-003-010, REQ-007-017: Syncer Interface ---
+
+// rsyncRun executes an rsync command. Injectable for testing.
+var rsyncRun = defaultRsyncRun
+
+// defaultRsyncRun runs rsync via os/exec.
+func defaultRsyncRun(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("rsync failed: %w", err)
+	}
+	return string(out), nil
+}
+
+// SyncTo copies files from host to guest using rsync over SSH.
+// REQ-003-010, REQ-007-015
+func (b *limaBackend) SyncTo(ctx context.Context, name, hostPath, guestPath string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("sync-to cancelled for %q: %w", name, err)
+	}
+
+	sshCfg, err := b.SSHConfig(ctx, name)
+	if err != nil {
+		return fmt.Errorf("sync-to failed for %q: %w", name, err)
+	}
+
+	args := buildRsyncArgs(sshCfg, hostPath, sshTarget(sshCfg, guestPath), false)
+	if _, err := rsyncRun("rsync", args...); err != nil {
+		if strings.Contains(err.Error(), "No such file or directory") ||
+			strings.Contains(err.Error(), "No route to host") {
+			return fmt.Errorf("sync-to failed for %q: %w", name, backend.ErrVMNotRunning)
+		}
+		return fmt.Errorf("sync-to failed for %q: %w", name, err)
+	}
+
+	return nil
+}
+
+// SyncFrom copies files from guest to host using rsync over SSH.
+// REQ-003-010, REQ-007-016
+func (b *limaBackend) SyncFrom(ctx context.Context, name, guestPath, hostPath string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("sync-from cancelled for %q: %w", name, err)
+	}
+
+	sshCfg, err := b.SSHConfig(ctx, name)
+	if err != nil {
+		return fmt.Errorf("sync-from failed for %q: %w", name, err)
+	}
+
+	args := buildRsyncArgs(sshCfg, sshTarget(sshCfg, guestPath), hostPath, false)
+	if _, err := rsyncRun("rsync", args...); err != nil {
+		if strings.Contains(err.Error(), "No such file or directory") ||
+			strings.Contains(err.Error(), "No route to host") {
+			return fmt.Errorf("sync-from failed for %q: %w", name, backend.ErrVMNotRunning)
+		}
+		return fmt.Errorf("sync-from failed for %q: %w", name, err)
+	}
+
+	return nil
+}
+
+// SyncDiff returns a dry-run preview of differences between guest and host.
+// REQ-007-017
+func (b *limaBackend) SyncDiff(ctx context.Context, name, guestPath, hostPath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("sync-diff cancelled for %q: %w", name, err)
+	}
+
+	sshCfg, err := b.SSHConfig(ctx, name)
+	if err != nil {
+		return "", fmt.Errorf("sync-diff failed for %q: %w", name, err)
+	}
+
+	args := buildRsyncArgs(sshCfg, sshTarget(sshCfg, guestPath), hostPath, true)
+	out, err := rsyncRun("rsync", args...)
+	if err != nil {
+		if strings.Contains(err.Error(), "No such file or directory") ||
+			strings.Contains(err.Error(), "No route to host") {
+			return "", fmt.Errorf("sync-diff failed for %q: %w", name, backend.ErrVMNotRunning)
+		}
+		return "", fmt.Errorf("sync-diff failed for %q: %w", name, err)
+	}
+
+	return out, nil
+}
+
+// buildRsyncArgs constructs rsync arguments for the given SSH config.
+func buildRsyncArgs(sshCfg backend.SSHConfig, src, dst string, dryRun bool) []string {
+	args := []string{"-avz"}
+
+	if dryRun {
+		args = append(args, "--dry-run", "--itemize-changes")
+	}
+
+	// Build the SSH command to use with rsync's -e flag
+	var sshCmd string
+	if sshCfg.Transport == "vsock" {
+		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='%s' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i %s",
+			sshCfg.ProxyCommand, sshCfg.IdentityFile)
+	} else {
+		sshCmd = fmt.Sprintf("ssh -p %d -o StrictHostKeyChecking=yes -o LogLevel=ERROR -i %s",
+			sshCfg.Port, sshCfg.IdentityFile)
+		if sshCfg.Host != "" {
+			homeDir, _ := os.UserHomeDir()
+			knownHosts := filepath.Join(homeDir, ".sd", "vms", strings.Split(sshCfg.Host, ":")[0], "ssh", "known_hosts")
+			sshCmd += fmt.Sprintf(" -o UserKnownHostsFile=%s", knownHosts)
+		}
+	}
+
+	args = append(args, "-e", sshCmd)
+	args = append(args, src, dst)
+
+	return args
+}
+
+// sshTarget constructs the rsync remote target (user@host:path or user@VM:path for VSOCK).
+func sshTarget(sshCfg backend.SSHConfig, path string) string {
+	if sshCfg.Transport == "vsock" {
+		// For VSOCK, rsync uses the VM name as target via ProxyCommand
+		return fmt.Sprintf("%s@%s:%s", sshCfg.User, "localhost", path)
+	}
+	return fmt.Sprintf("%s@%s:%s", sshCfg.User, sshCfg.Host, path)
+}
+
 // now returns the current time. Extracted for testability.
 var now = time.Now
