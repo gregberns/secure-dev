@@ -21,13 +21,13 @@ func TestLoadBuiltinModules_AllPresent(t *testing.T) {
 	for i, m := range modules {
 		names[i] = m.Name
 	}
-	assert.Equal(t, BuiltinModuleNames, names, "all 7 built-in modules must be present in canonical order")
+	assert.Equal(t, BuiltinModuleNames, names, "all 8 built-in modules must be present in canonical order")
 }
 
 func TestLoadBuiltinModules_Count(t *testing.T) {
 	modules, err := LoadBuiltinModules()
 	require.NoError(t, err)
-	assert.Len(t, modules, 7, "REQ-006-001 specifies exactly 7 built-in modules")
+	assert.Len(t, modules, 8, "REQ-006-001 specifies exactly 8 built-in modules")
 }
 
 func TestLoadBuiltinModules_AllValid(t *testing.T) {
@@ -255,6 +255,136 @@ func TestLoadBuiltinModules_AllIdempotent(t *testing.T) {
 	}
 }
 
+func TestLoadBuiltinModules_SshHardeningConfiguresPortForwarding(t *testing.T) {
+	// REQ-004-026: SSH port forwarding restrictions provisioned as a module
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var sshHardening *Module
+	for i := range modules {
+		if modules[i].Name == "ssh-hardening" {
+			sshHardening = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, sshHardening)
+
+	allScripts := ""
+	for _, s := range sshHardening.Scripts {
+		allScripts += s.Script + " "
+	}
+
+	// REQ-004-026: All required sshd directives must be present
+	requiredDirectives := []string{
+		"AllowTcpForwarding local",
+		"GatewayPorts no",
+		"PermitTunnel no",
+		"X11Forwarding no",
+	}
+	for _, directive := range requiredDirectives {
+		assert.Contains(t, allScripts, directive,
+			"ssh-hardening module must configure %q (REQ-004-026)", directive)
+	}
+}
+
+func TestLoadBuiltinModules_SshHardeningDropInConfig(t *testing.T) {
+	// REQ-004-026: Uses sshd_config.d drop-in for safe configuration
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var sshHardening *Module
+	for i := range modules {
+		if modules[i].Name == "ssh-hardening" {
+			sshHardening = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, sshHardening)
+
+	allScripts := ""
+	for _, s := range sshHardening.Scripts {
+		allScripts += s.Script + " "
+	}
+
+	// Must use drop-in config directory
+	assert.Contains(t, allScripts, "/etc/ssh/sshd_config.d/",
+		"ssh-hardening must use sshd_config.d drop-in (REQ-004-026)")
+	// Must reload (not restart) sshd to preserve sessions
+	assert.Contains(t, allScripts, "reload",
+		"ssh-hardening must reload sshd (not restart) to preserve sessions")
+	assert.NotContains(t, allScripts, "systemctl restart",
+		"ssh-hardening must NOT restart sshd (would drop sessions)")
+}
+
+func TestLoadBuiltinModules_SshHardeningSystemMode(t *testing.T) {
+	// REQ-004-026: SSH config changes require root (system mode)
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var sshHardening *Module
+	for i := range modules {
+		if modules[i].Name == "ssh-hardening" {
+			sshHardening = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, sshHardening)
+	assert.Len(t, sshHardening.Scripts, 1, "ssh-hardening should have one system-mode script")
+	assert.Equal(t, ModeSystem, sshHardening.Scripts[0].Mode,
+		"ssh-hardening must run as system mode (requires root)")
+}
+
+func TestLoadBuiltinModules_SshHardeningDependsOnBase(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var sshHardening *Module
+	for i := range modules {
+		if modules[i].Name == "ssh-hardening" {
+			sshHardening = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, sshHardening)
+	assert.Contains(t, sshHardening.DependsOn, "base",
+		"ssh-hardening must depend on base (REQ-006-002)")
+}
+
+func TestLoadBuiltinModules_SshHardeningHasProbe(t *testing.T) {
+	// REQ-006-008: Module should have a readiness probe
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var sshHardening *Module
+	for i := range modules {
+		if modules[i].Name == "ssh-hardening" {
+			sshHardening = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, sshHardening)
+	assert.NotNil(t, sshHardening.Probe, "ssh-hardening must have a readiness probe")
+	assert.Contains(t, sshHardening.Probe.Command, "AllowTcpForwarding",
+		"ssh-hardening probe must verify the sshd directive")
+}
+
+func TestLoadBuiltinModules_SshHardeningNoDownloads(t *testing.T) {
+	// ssh-hardening configures sshd only, no downloads
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var sshHardening *Module
+	for i := range modules {
+		if modules[i].Name == "ssh-hardening" {
+			sshHardening = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, sshHardening)
+	assert.False(t, sshHardening.HasDownloads(),
+		"ssh-hardening should not download any files")
+}
+
 func TestLoadBuiltinModules_ScriptModes(t *testing.T) {
 	// REQ-006-005: Scripts must use valid modes
 	modules, err := LoadBuiltinModules()
@@ -287,6 +417,7 @@ func TestLoadBuiltinModules_ResolveSingleModule(t *testing.T) {
 	require.NoError(t, err)
 
 	testCases := []struct{ requested, wantFirst, wantLast string }{
+		{"ssh-hardening", "base", "ssh-hardening"},
 		{"golang", "base", "golang"},
 		{"docker", "base", "docker"},
 		{"claude-code", "base", "claude-code"},
@@ -316,8 +447,8 @@ func TestProperty_LoadBuiltinModules_AlwaysSucceeds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadBuiltinModules should never fail: %v", err)
 		}
-		if len(modules) != 7 {
-			t.Fatalf("expected 7 modules, got %d", len(modules))
+		if len(modules) != 8 {
+			t.Fatalf("expected 8 modules, got %d", len(modules))
 		}
 	})
 }

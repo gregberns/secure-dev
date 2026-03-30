@@ -451,7 +451,7 @@ func TestProvisionList_JSONOutput(t *testing.T) {
 	assert.True(t, result["ok"].(bool))
 
 	data := result["data"].([]interface{})
-	assert.GreaterOrEqual(t, len(data), 7, "should have at least 7 built-in modules")
+	assert.GreaterOrEqual(t, len(data), 8, "should have at least 8 built-in modules")
 
 	first := data[0].(map[string]interface{})
 	assert.Contains(t, first, "name")
@@ -901,7 +901,7 @@ func TestProvisionList_ContainsAllBuiltinModules(t *testing.T) {
 func TestProvisionList_EmbeddedFS(t *testing.T) {
 	mods, err := provision.LoadBuiltinModules()
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(mods), 7)
+	assert.GreaterOrEqual(t, len(mods), 8)
 
 	for _, name := range provision.BuiltinModuleNames {
 		found := false

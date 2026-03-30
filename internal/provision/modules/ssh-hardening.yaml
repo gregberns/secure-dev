@@ -1,0 +1,28 @@
+name: ssh-hardening
+description: "SSH daemon hardening: restrict port forwarding to local-only, disable tunneling and X11 forwarding"
+depends_on:
+  - base
+scripts:
+  - mode: system
+    script: |
+      # REQ-004-026: SSH port forwarding restrictions
+      # Prevent SSH port forwarding from bypassing egress controls.
+      mkdir -p /etc/ssh/sshd_config.d
+      cat > /etc/ssh/sshd_config.d/99-sd-restrictions.conf << 'SSHD_CONFIG'
+      # Managed by sd (secure-dev) -- do not edit
+      AllowTcpForwarding local
+      GatewayPorts no
+      PermitTunnel no
+      X11Forwarding no
+      SSHD_CONFIG
+      chmod 644 /etc/ssh/sshd_config.d/99-sd-restrictions.conf
+      # Reload sshd to apply changes (safe: preserves existing sessions)
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+      elif command -v service >/dev/null 2>&1; then
+        service ssh reload 2>/dev/null || true
+      fi
+probe:
+  command: "grep -q 'AllowTcpForwarding local' /etc/ssh/sshd_config.d/99-sd-restrictions.conf 2>/dev/null"
+  interval: 5s
+  timeout: 30s

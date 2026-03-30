@@ -221,6 +221,7 @@ func isValidModuleName(name string) bool {
 // should appear in listings. REQ-006-001.
 var BuiltinModuleNames = []string{
 	"base",
+	"ssh-hardening",
 	"claude-code",
 	"docker",
 	"golang",

@@ -379,6 +379,26 @@ Still missing: security status, diff, config egress.
   - Unit tests: success, independent lifecycle (start clone, verify source unaffected, destroy source, verify clone OK), same config inherited, source not found, destination already exists, clone of clone, many clones (5 from same source), empty names (src and dst), context cancelled, running source (clone succeeds, clone is stopped, source still running), Cloner interface assertion
   - Property tests: clone always creates independent VM (100), clone nonexistent source always ErrVMNotFound (100), clone to existing name always ErrVMAlreadyExists (100), cancelled context always fails with "cancelled" (100)
 
+### SSH port forwarding restrictions implemented (REQ-004-026)
+- `internal/provision/modules/ssh-hardening.yaml` with system-mode provisioning script:
+  - Creates `/etc/ssh/sshd_config.d/99-sd-restrictions.conf` drop-in config
+  - Sets `AllowTcpForwarding local` (allows -L only, blocks -R and -D)
+  - Sets `GatewayPorts no` (local forward binds only to 127.0.0.1)
+  - Sets `PermitTunnel no` (disables tun device forwarding)
+  - Sets `X11Forwarding no` (disables X11 forwarding)
+  - Reloads sshd (preserves existing sessions, safe for Lima management)
+- Added "ssh-hardening" to `BuiltinModuleNames` (positioned after base)
+- Depends on base (REQ-006-002)
+- Probe verifies `AllowTcpForwarding local` in drop-in config
+- Tests in `internal/provision/modules_test.go` (6 new tests):
+  - All 4 required sshd directives present
+  - Uses drop-in config (not main sshd_config)
+  - Reloads (not restarts) sshd
+  - System mode (requires root)
+  - Depends on base
+  - Has probe, no downloads
+- Updated test counts from 7 to 8 modules throughout
+
 ### No iptables/egress implementation
 REQ-004-009: Egress control is policy-level only.
 
