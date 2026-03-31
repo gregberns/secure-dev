@@ -10,6 +10,10 @@ scripts:
       # REQ-004-009: Egress implementation via iptables
       # Only traffic to explicitly allowlisted destinations is permitted.
       export DEBIAN_FRONTEND=noninteractive
+      # Ensure package index is available (may have been cleared)
+      if [ ! -d /var/lib/apt/lists ] || [ -z "$(ls /var/lib/apt/lists/ 2>/dev/null)" ]; then
+        apt-get update -qq
+      fi
       apt-get install -y --no-install-recommends iptables iptables-persistent
       # Flush existing sd-egress chain if present (idempotent re-provisioning)
       iptables -F sd-egress 2>/dev/null || true

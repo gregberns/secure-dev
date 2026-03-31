@@ -233,14 +233,12 @@ var BuiltinModuleNames = []string{
 }
 
 // DefaultModuleNames defines the modules provisioned when no --modules flag is given.
-// Includes base infrastructure and security hardening. App-specific modules
-// (claude-code, docker, golang, etc.) are opt-in via --modules.
-// REQ-004-006, REQ-004-025, REQ-004-026.
+// Includes base infrastructure and SSH hardening (required for credential injection).
+// Network hardening (dns-filter, egress) is opt-in via --modules until fully stabilized.
+// REQ-004-026.
 var DefaultModuleNames = []string{
 	"base",
 	"ssh-hardening",
-	"dns-filter",
-	"egress",
 }
 
 // LoadBuiltinModules reads all embedded module YAML files, parses them,

@@ -13,7 +13,7 @@ scripts:
         jq \
         tmux \
         vim
-      rm -rf /var/lib/apt/lists/*
+      # Keep /var/lib/apt/lists/ intact -- other modules need apt-get install
   - mode: user
     script: |
       # REQ-004-030: Prevent git credential caching to disk

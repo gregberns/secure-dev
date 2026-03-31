@@ -10,9 +10,16 @@ scripts:
       # DNS queries for non-allowlisted domains return NXDOMAIN,
       # preventing DNS-based data exfiltration.
       export DEBIAN_FRONTEND=noninteractive
+      # Ensure package index is available (may have been cleared)
+      if [ ! -d /var/lib/apt/lists ] || [ -z "$(ls /var/lib/apt/lists/ 2>/dev/null)" ]; then
+        apt-get update -qq
+      fi
+      # Install dnsmasq BEFORE disabling systemd-resolved (DNS needed for downloads)
       apt-get install -y --no-install-recommends dnsmasq
-      # Stop dnsmasq before reconfiguring
+      # Stop both services before reconfiguring
       systemctl stop dnsmasq 2>/dev/null || true
+      systemctl stop systemd-resolved 2>/dev/null || true
+      systemctl disable systemd-resolved 2>/dev/null || true
       # Capture upstream DNS before overwriting resolv.conf
       UPSTREAM_DNS=$(grep -m1 '^nameserver' /etc/resolv.conf | awk '{print $2}')
       if [ -z "$UPSTREAM_DNS" ]; then
