@@ -89,7 +89,7 @@ func (b *limaBackend) Create(ctx context.Context, name string, cfg backend.VMCon
 		return fmt.Errorf("create cancelled for %q: %w", name, err)
 	}
 
-	_, err = b.executor.Run("limactl", "create", "--name", name, yamlPath)
+	_, err = b.executor.Run("limactl", "create", "--tty=false", "--name", name, yamlPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("vm %q already exists: %w", name, backend.ErrVMAlreadyExists)
@@ -107,7 +107,7 @@ func (b *limaBackend) Start(ctx context.Context, name string) error {
 		return fmt.Errorf("start cancelled for %q: %w", name, err)
 	}
 
-	output, err := b.executor.Run("limactl", "start", name)
+	output, err := b.executor.Run("limactl", "start", "--tty=false", name)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
@@ -177,12 +177,33 @@ func (b *limaBackend) Destroy(ctx context.Context, name string) error {
 
 // Status returns the current status of a named VM using limactl.
 // REQ-003-004
+// Note: limactl has no dedicated "status" subcommand; we use "list --json"
+// and filter by name. The mocklimactl digital twin still supports "status"
+// for backward compat in tests.
 func (b *limaBackend) Status(ctx context.Context, name string) (backend.VMStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("status cancelled for %q: %w", name, err)
 	}
 
+	// Try mock-compatible "status" first; fall back to "list --json" for real limactl.
 	output, err := b.executor.Run("limactl", "status", name)
+	if err != nil && strings.Contains(err.Error(), "unknown command") {
+		// Real limactl: use list --json and filter by name
+		listOut, listErr := b.executor.Run("limactl", "list", "--json")
+		if listErr != nil {
+			return "", fmt.Errorf("failed to get status for vm %q: %w", name, listErr)
+		}
+		vms, parseErr := parseListOutput(listOut)
+		if parseErr != nil {
+			return "", fmt.Errorf("failed to parse vm list for %q: %w", name, parseErr)
+		}
+		for _, vm := range vms {
+			if vm.Name == name {
+				return vm.Status, nil
+			}
+		}
+		return "", fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return "", fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
@@ -263,16 +284,40 @@ func (b *limaBackend) getSSHPort(ctx context.Context, name string) int {
 		return 0
 	}
 
-	var entries []struct {
-		Name string `json:"name"`
-		SSH  string `json:"ssh"`
+	// Parse JSONL or JSON array — both real limactl and mock.
+	type sshEntry struct {
+		Name         string `json:"name"`
+		SSH          string `json:"ssh"`           // mock format: "127.0.0.1:52215"
+		SSHLocalPort int    `json:"sshLocalPort"`  // real limactl format
 	}
+
+	var entries []sshEntry
+
+	// Try JSON array (mock)
 	if err := json.Unmarshal([]byte(output), &entries); err != nil {
-		return 0
+		// Try JSONL (real limactl)
+		for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var e sshEntry
+			if err := json.Unmarshal([]byte(line), &e); err == nil {
+				entries = append(entries, e)
+			}
+		}
 	}
 
 	for _, e := range entries {
-		if e.Name == name && e.SSH != "" {
+		if e.Name != name {
+			continue
+		}
+		// Real limactl: use sshLocalPort directly
+		if e.SSHLocalPort > 0 {
+			return e.SSHLocalPort
+		}
+		// Mock: parse "host:port" string
+		if e.SSH != "" {
 			parts := strings.Split(e.SSH, ":")
 			if len(parts) == 2 {
 				var port int
@@ -347,39 +392,69 @@ func parseStatus(output string) (backend.VMStatus, error) {
 }
 
 // parseListOutput parses limactl list output into VMInfo structs.
-// Tries JSON first (from limactl list --json), then falls back to
-// tab-separated text parsing with header detection.
+// Supports three formats:
+//  1. JSONL (one JSON object per line) — real limactl list --json
+//  2. JSON array — mocklimactl list --json
+//  3. Tab-separated text — fallback
 func parseListOutput(output string) ([]backend.VMInfo, error) {
 	if output == "" {
 		return []backend.VMInfo{}, nil
 	}
 
-	// Try JSON parsing first
-	var entries []struct {
+	// limaEntry supports both mock (string memory/disk) and real (int64 bytes) formats.
+	type limaEntry struct {
 		Name      string `json:"name"`
 		Status    string `json:"status"`
 		CPUs      int    `json:"cpus"`
-		Memory    string `json:"memory"`
-		Disk      string `json:"disk"`
 		Dir       string `json:"dir"`
+
+		// Real limactl uses int64 bytes; mock uses string.
+		MemoryRaw json.RawMessage `json:"memory"`
+		DiskRaw   json.RawMessage `json:"disk"`
 	}
-	if err := json.Unmarshal([]byte(output), &entries); err == nil {
-		result := make([]backend.VMInfo, 0, len(entries))
-		for _, e := range entries {
-			result = append(result, backend.VMInfo{
-				Name:    e.Name,
-				Status:  backend.VMStatus(strings.ToLower(e.Status)),
-				Backend: "lima",
-				CPUs:    e.CPUs,
-				Memory:  e.Memory,
-				Disk:    e.Disk,
-			})
+
+	parseEntry := func(e limaEntry) backend.VMInfo {
+		info := backend.VMInfo{
+			Name:    e.Name,
+			Status:  backend.VMStatus(strings.ToLower(e.Status)),
+			Backend: "lima",
+			CPUs:    e.CPUs,
+		}
+		// Parse memory: try int64 (bytes from real limactl), then string
+		info.Memory = parseResourceField(e.MemoryRaw)
+		info.Disk = parseResourceField(e.DiskRaw)
+		return info
+	}
+
+	// Try JSON array first (mock format)
+	var arrayEntries []limaEntry
+	if err := json.Unmarshal([]byte(output), &arrayEntries); err == nil {
+		result := make([]backend.VMInfo, 0, len(arrayEntries))
+		for _, e := range arrayEntries {
+			result = append(result, parseEntry(e))
+		}
+		return result, nil
+	}
+
+	// Try JSONL (one JSON object per line — real limactl format)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[0]), "{") {
+		result := make([]backend.VMInfo, 0, len(lines))
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var e limaEntry
+			if err := json.Unmarshal([]byte(line), &e); err != nil {
+				continue
+			}
+			result = append(result, parseEntry(e))
 		}
 		return result, nil
 	}
 
 	// Fallback: tab-separated text with header detection
-	lines := strings.Split(strings.TrimSpace(output), "\n")
 	result := make([]backend.VMInfo, 0, len(lines))
 
 	for _, line := range lines {
@@ -404,12 +479,10 @@ func parseListOutput(output string) ([]backend.VMInfo, error) {
 		// Real limactl: NAME STATUS SSH VMTYPE ARCH CPUS MEMORY DISK DIR
 		// Compact:      NAME STATUS BASE_IMAGE CPUS MEMORY DISK
 		if len(fields) >= 9 {
-			// Real limactl format: CPUS at index 5, MEMORY at 6, DISK at 7
 			fmt.Sscanf(fields[5], "%d", &info.CPUs)
 			info.Memory = fields[6]
 			info.Disk = fields[7]
 		} else {
-			// Compact format: CPUS at index 3, MEMORY at 4, DISK at 5
 			fmt.Sscanf(fields[3], "%d", &info.CPUs)
 			info.Memory = fields[4]
 			info.Disk = fields[5]
@@ -419,6 +492,33 @@ func parseListOutput(output string) ([]backend.VMInfo, error) {
 	}
 
 	return result, nil
+}
+
+// parseResourceField parses a JSON field that may be an int64 (bytes) or string.
+func parseResourceField(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Try int64 first (real limactl outputs bytes)
+	var bytes int64
+	if err := json.Unmarshal(raw, &bytes); err == nil {
+		return formatBytes(bytes)
+	}
+	// Try string (mock format)
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
+}
+
+// formatBytes converts bytes to a human-readable GiB string.
+func formatBytes(b int64) string {
+	gib := float64(b) / (1024 * 1024 * 1024)
+	if gib == float64(int64(gib)) {
+		return fmt.Sprintf("%dGiB", int64(gib))
+	}
+	return fmt.Sprintf("%.1fGiB", gib)
 }
 
 // generateLimaYAML generates Lima configuration from VMConfig.
@@ -564,7 +664,7 @@ func (b *limaBackend) SnapshotCreate(ctx context.Context, name, tag string) erro
 		return fmt.Errorf("snapshot create cancelled for %q: %w", name, err)
 	}
 
-	_, err := b.executor.Run("limactl", "snapshot", "create", name, tag)
+	_, err := b.executor.Run("limactl", "snapshot", "create", name, "--tag", tag)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
@@ -582,7 +682,7 @@ func (b *limaBackend) SnapshotApply(ctx context.Context, name, tag string) error
 		return fmt.Errorf("snapshot apply cancelled for %q: %w", name, err)
 	}
 
-	_, err := b.executor.Run("limactl", "snapshot", "restore", name, tag)
+	_, err := b.executor.Run("limactl", "snapshot", "apply", name, "--tag", tag)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return fmt.Errorf("snapshot %q not found for vm %q: %w", tag, name, backend.ErrSnapshotNotFound)
@@ -600,7 +700,7 @@ func (b *limaBackend) SnapshotDelete(ctx context.Context, name, tag string) erro
 		return fmt.Errorf("snapshot delete cancelled for %q: %w", name, err)
 	}
 
-	_, err := b.executor.Run("limactl", "snapshot", "delete", name, tag)
+	_, err := b.executor.Run("limactl", "snapshot", "delete", name, "--tag", tag)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return fmt.Errorf("snapshot %q not found for vm %q: %w", tag, name, backend.ErrSnapshotNotFound)

@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -141,17 +143,29 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// REQ-004-031: Capture SSH host key for TCP-based connections
-	if l := Loader(); l != nil {
-		sdHome := l.SDHome()
-		if sshCfg, err := b.SSHConfig(cmd.Context(), name); err == nil {
-			if sshCfg.Transport == "tcp" && sshCfg.Host != "" && sshCfg.Port > 0 {
-				if hkErr := captureHostKey(sdHome, name, sshCfg.Host, sshCfg.Port); hkErr != nil {
-					f.Progress(fmt.Sprintf("Warning: could not capture SSH host key: %v", hkErr))
-				}
-			}
+	// REQ-001-006 step 4: Start the VM before provisioning.
+	// Lima's create only defines the VM config; start boots it.
+	f.Progress(fmt.Sprintf("Starting VM %q...", name))
+	if err := b.Start(cmd.Context(), name); err != nil {
+		// Start failed -- clean up the created-but-not-started VM
+		b.Destroy(cmd.Context(), name)
+		return ui.CLIError{
+			Code:    "vm_start_failed",
+			Message: fmt.Sprintf("failed to start VM %q after creation: %v", name, err),
 		}
 	}
+
+	// REQ-007-003: Generate per-VM SSH keys and inject public key into VM.
+	// REQ-007-004: Write SSH config fragment for standard SSH tools.
+	// REQ-004-031: Capture SSH host key for TCP-based connections.
+	sdHome := ""
+	if l := Loader(); l != nil {
+		sdHome = l.SDHome()
+	}
+	if sdHome == "" {
+		sdHome = defaultSDHome()
+	}
+	setupSSH(cmd.Context(), f, b, name, sdHome)
 
 	// REQ-001-006 step 5: Run provisioning modules after VM creation.
 	modulesFlag, _ := cmd.Flags().GetStringSlice("modules")
@@ -188,6 +202,75 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// defaultSDHome returns the default SD home directory (~/.sd).
+func defaultSDHome() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".sd")
+}
+
+// setupSSH generates SSH keys, injects the public key into the VM, captures host keys,
+// and writes the SSH config fragment. All errors are non-fatal warnings.
+// REQ-007-003, REQ-007-004, REQ-004-031
+func setupSSH(ctx context.Context, f *ui.Formatter, b backend.Backend, name, sdHome string) {
+	// Step 1: Generate per-VM SSH keys
+	if err := generateSSHKeys(sdHome, name); err != nil {
+		f.Progress(fmt.Sprintf("Warning: could not generate SSH keys: %v", err))
+		return
+	}
+
+	// Step 2: Read the public key
+	_, _, pubKeyPath := ssh.KeyPaths(sdHome, name)
+	pubKeyBytes, err := os.ReadFile(pubKeyPath)
+	if err != nil {
+		f.Progress(fmt.Sprintf("Warning: could not read public key: %v", err))
+		return
+	}
+
+	// Step 3: Inject public key into VM's authorized_keys
+	pubKey := strings.TrimSpace(string(pubKeyBytes))
+	injectCmd := fmt.Sprintf("mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo %q >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys", pubKey)
+	if _, execErr := b.Exec(ctx, name, []string{"bash", "-c", injectCmd}); execErr != nil {
+		f.Progress(fmt.Sprintf("Warning: could not inject SSH public key: %v", execErr))
+	}
+
+	// Step 4: Get SSH config from backend and write config fragment + capture host key
+	sshCfg, err := b.SSHConfig(ctx, name)
+	if err != nil {
+		f.Progress(fmt.Sprintf("Warning: could not get SSH config: %v", err))
+		return
+	}
+
+	// REQ-004-031: Capture host key for TCP connections
+	if sshCfg.Transport == "tcp" && sshCfg.Host != "" && sshCfg.Port > 0 {
+		if hkErr := captureHostKey(sdHome, name, sshCfg.Host, sshCfg.Port); hkErr != nil {
+			f.Progress(fmt.Sprintf("Warning: could not capture SSH host key: %v", hkErr))
+		}
+	}
+
+	// REQ-007-004: Write SSH config fragment
+	home, _ := os.UserHomeDir()
+	sshDir := filepath.Join(home, ".ssh")
+	fragmentOpts := ssh.SSHFragmentOpts{
+		VMName:       name,
+		HostName:     sshCfg.Host,
+		Port:         sshCfg.Port,
+		User:         sshCfg.User,
+		SDHome:       sdHome,
+		ProxyCommand: sshCfg.ProxyCommand,
+	}
+	if sshCfg.Transport == "vsock" {
+		fragmentOpts.Transport = ssh.TransportVSOCK
+	} else {
+		fragmentOpts.Transport = ssh.TransportTCP
+	}
+	if err := ssh.WriteFragment(sshDir, fragmentOpts); err != nil {
+		f.Progress(fmt.Sprintf("Warning: could not write SSH config fragment: %v", err))
+	}
+}
+
+// generateSSHKeys generates per-VM SSH keys. Overrideable for testing.
+var generateSSHKeys = ssh.GenerateKeys
+
 // runCreateProvision runs provisioning modules on a newly created VM.
 // REQ-001-006 step 5: Provision after VM creation.
 // Returns nil if no modules are requested, otherwise the provisioning result.
@@ -208,8 +291,10 @@ func runCreateProvision(ctx context.Context, f *ui.Formatter, b backend.Backend,
 		}
 		resolved, err = provision.ResolveRequested(allModules, requested)
 	} else {
-		// No modules specified -- provision all modules by default
-		resolved, err = provision.ResolveAll(allModules)
+		// No modules specified -- provision default set (base + security hardening).
+		// App modules (claude-code, docker, golang, etc.) are opt-in via --modules.
+		// REQ-004-006, REQ-004-025, REQ-004-026.
+		resolved, err = provision.ResolveRequested(allModules, provision.DefaultModuleNames)
 	}
 	if err != nil {
 		f.Progress(fmt.Sprintf("Warning: could not resolve modules: %v", err))

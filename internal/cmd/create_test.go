@@ -966,8 +966,15 @@ func TestCreateCommand_Provisioning_ExecFailure(t *testing.T) {
 	}
 	setupProvisionCreateTest(t, mb)
 
+	// Override generateSSHKeys so SSH setup doesn't consume the exec error
+	origGen := generateSSHKeys
+	generateSSHKeys = func(sdHome, vmName string) error {
+		return fmt.Errorf("skip in test")
+	}
+	t.Cleanup(func() { generateSSHKeys = origGen })
+
 	root := RootCmd()
-	root.SetArgs([]string{"create", "testvm"})
+	root.SetArgs([]string{"create", "testvm", "--modules", "base"})
 	err := root.Execute()
 
 	require.Error(t, err)
@@ -986,6 +993,13 @@ func TestCreateCommand_Provisioning_ModuleLoadFailure_NonFatal(t *testing.T) {
 		return nil, fmt.Errorf("module load error")
 	}
 	t.Cleanup(func() { loadBuiltinModules = origLoad })
+
+	// Override generateSSHKeys to avoid SSH setup Exec calls
+	origGen := generateSSHKeys
+	generateSSHKeys = func(sdHome, vmName string) error {
+		return fmt.Errorf("skip in test")
+	}
+	t.Cleanup(func() { generateSSHKeys = origGen })
 
 	root := RootCmd()
 	root.SetArgs([]string{"create", "testvm"})
@@ -1059,8 +1073,15 @@ func TestProperty_Create_ProvisionFailureAlwaysCleansUp(t *testing.T) {
 			}
 			setupProvisionCreateTest(t, mb)
 
+			// Override generateSSHKeys so SSH setup doesn't consume the exec error
+			origGen := generateSSHKeys
+			generateSSHKeys = func(sdHome, vmName string) error {
+				return fmt.Errorf("skip in test")
+			}
+			t.Cleanup(func() { generateSSHKeys = origGen })
+
 			root := RootCmd()
-			root.SetArgs([]string{"create", name})
+			root.SetArgs([]string{"create", name, "--modules", "base"})
 			err := root.Execute()
 
 			require.Error(t, err)

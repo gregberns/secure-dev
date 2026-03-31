@@ -2,7 +2,12 @@
 // REQ-002-001: CLI binary named sd, entry point at cmd/sd/main.go
 package main
 
-import "sd/internal/cmd"
+import (
+	"sd/internal/cmd"
+
+	// Register backends via init() functions.
+	_ "sd/internal/backend/lima"
+)
 
 func main() {
 	_ = cmd.Execute()

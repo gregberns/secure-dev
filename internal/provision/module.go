@@ -232,6 +232,17 @@ var BuiltinModuleNames = []string{
 	"github-cli",
 }
 
+// DefaultModuleNames defines the modules provisioned when no --modules flag is given.
+// Includes base infrastructure and security hardening. App-specific modules
+// (claude-code, docker, golang, etc.) are opt-in via --modules.
+// REQ-004-006, REQ-004-025, REQ-004-026.
+var DefaultModuleNames = []string{
+	"base",
+	"ssh-hardening",
+	"dns-filter",
+	"egress",
+}
+
 // LoadBuiltinModules reads all embedded module YAML files, parses them,
 // validates them, and returns them in canonical order.
 // REQ-006-014: Built-in modules loaded from embedded FS.

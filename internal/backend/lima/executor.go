@@ -4,6 +4,7 @@ package lima
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"sd/internal/backend"
@@ -21,8 +22,12 @@ type CommandExecutor interface {
 type realExecutor struct{}
 
 func (e *realExecutor) Run(name string, args ...string) (string, error) {
-	// Will be implemented when connecting to real limactl.
-	return "", fmt.Errorf("real limactl executor not yet connected: %w", backend.ErrNotImplemented)
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%s: %w", string(out), err)
+	}
+	return string(out), nil
 }
 
 // mockExecutor delegates to mocklimactl for testing.

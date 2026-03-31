@@ -51,6 +51,19 @@ var (
 	state = make(map[string]*VMState)
 )
 
+// stripGlobalFlags removes limactl global flags (e.g. --tty=false) from args
+// so the mock command handlers only see subcommand-specific arguments.
+func stripGlobalFlags(args []string) []string {
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if strings.HasPrefix(a, "--tty") {
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	return filtered
+}
+
 // MockRun simulates a limactl command.
 func MockRun(args []string) (string, error) {
 	if len(args) == 0 {
@@ -58,7 +71,7 @@ func MockRun(args []string) (string, error) {
 	}
 
 	cmd := args[0]
-	cmdArgs := args[1:]
+	cmdArgs := stripGlobalFlags(args[1:])
 
 	switch cmd {
 	case "create":
@@ -361,6 +374,28 @@ func execShell(args ...string) (string, error) {
 	}
 }
 
+// parseNameTag extracts a VM name and tag from args, supporting both
+// positional (name tag) and flag (name --tag tag) formats.
+func parseNameTag(args []string) (name, tag string, err error) {
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--tag" && i+1 < len(args) {
+			tag = args[i+1]
+			i++
+		} else if !strings.HasPrefix(args[i], "--") {
+			positional = append(positional, args[i])
+		}
+	}
+	if len(positional) == 0 {
+		return "", "", fmt.Errorf("missing VM name")
+	}
+	name = positional[0]
+	if tag == "" && len(positional) >= 2 {
+		tag = positional[1] // legacy positional format
+	}
+	return name, tag, nil
+}
+
 // snapshotCmd handles snapshot subcommands.
 func snapshotCmd(args ...string) (string, error) {
 	if len(args) == 0 {
@@ -375,7 +410,7 @@ func snapshotCmd(args ...string) (string, error) {
 		return createSnapshot(remaining...)
 	case "list":
 		return listSnapshots(remaining...)
-	case "restore":
+	case "apply", "restore":
 		return restoreSnapshot(remaining...)
 	case "delete":
 		return deleteSnapshot(remaining...)
@@ -386,11 +421,10 @@ func snapshotCmd(args ...string) (string, error) {
 
 // createSnapshot creates a VM snapshot.
 func createSnapshot(args ...string) (string, error) {
-	if len(args) < 2 {
-		return "", fmt.Errorf("usage: mocklimactl snapshot create <name> <tag>")
+	name, tag, err := parseNameTag(args)
+	if err != nil || tag == "" {
+		return "", fmt.Errorf("usage: mocklimactl snapshot create <name> --tag <tag>")
 	}
-	name := args[0]
-	tag := args[1]
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -452,11 +486,10 @@ func listSnapshots(args ...string) (string, error) {
 
 // restoreSnapshot restores a VM from a snapshot.
 func restoreSnapshot(args ...string) (string, error) {
-	if len(args) < 2 {
-		return "", fmt.Errorf("usage: mocklimactl snapshot restore <name> <tag>")
+	name, tag, err := parseNameTag(args)
+	if err != nil || tag == "" {
+		return "", fmt.Errorf("usage: mocklimactl snapshot restore <name> --tag <tag>")
 	}
-	name := args[0]
-	tag := args[1]
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -488,11 +521,10 @@ func restoreSnapshot(args ...string) (string, error) {
 
 // deleteSnapshot deletes a VM snapshot.
 func deleteSnapshot(args ...string) (string, error) {
-	if len(args) < 2 {
-		return "", fmt.Errorf("usage: mocklimactl snapshot delete <name> <tag>")
+	name, tag, err := parseNameTag(args)
+	if err != nil || tag == "" {
+		return "", fmt.Errorf("usage: mocklimactl snapshot delete <name> --tag <tag>")
 	}
-	name := args[0]
-	tag := args[1]
 
 	mu.Lock()
 	defer mu.Unlock()

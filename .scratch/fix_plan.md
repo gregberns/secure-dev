@@ -632,3 +632,85 @@ Added comprehensive tests:
 - Property tests: always returns valid name and status (100 cases), security keys always fail (100 cases)
 - Fixed existing test check counts from 7 to 8
 
+
+### Provisioning wired into create command (REQ-001-006 step 5)
+- `internal/cmd/create.go`: After `b.Create()` succeeds, `runCreateProvision()` resolves and runs provisioning modules
+  - No `--modules` flag: provisions all builtin modules by default
+  - `--modules base,claude-code`: provisions only specified modules (base always included)
+  - Module load failure: non-fatal warning, VM creation still succeeds
+  - Provisioning script failure: VM cleaned up via `b.Destroy()`, returns `provision_script_failed`
+- Tests in `internal/cmd/create_test.go` (10 new tests):
+  - Unit tests: RunsModules, WithModulesFlag, ExecFailure, ModuleLoadFailure_NonFatal, ExecRecordsVMName, ExecUsesSudo_SystemMode
+  - Property tests: ProvisioningAlwaysRuns (3 names), ProvisionFailureAlwaysCleansUp (3 names)
+
+### Real limactl executor connected (REQ-003-014)
+- `internal/backend/lima/executor.go`: Implemented `realExecutor.Run()` using `os/exec.Command`
+  - Runs commands via `exec.Command(name, args...)` with `CombinedOutput()`
+  - Returns stdout+stderr combined, wraps errors with output context
+  - Previously returned "not implemented" error, now actually executes limactl
+- `sd create`, `sd start`, `sd stop`, `sd destroy`, `sd exec`, `sd list`, `sd status` all work with real limactl
+
+### VM start step added to create flow (REQ-001-006 step 4)
+- `internal/cmd/create.go`: Added `b.Start()` call after `b.Create()` and before provisioning
+  - Lima's `create` only defines the VM config; `start` boots it
+  - Start failure cleans up the created VM via `b.Destroy()`
+  - Returns `vm_start_failed` error code on failure
+- `internal/backend/lima/lima.go`: Added `--tty=false` to `limactl create` and `limactl start` for non-interactive automation
+- `internal/backend/lima/mocklimactl/mocklimactl.go`: Added `stripGlobalFlags()` to handle `--tty=false` in mock
+
+### Status() fixed to work with real limactl (REQ-003-004)
+- `internal/backend/lima/lima.go`: `Status()` now falls back to `limactl list --json` when `limactl status` (which doesn't exist) fails
+  - Tries mock-compatible "status" first for backward compat in tests
+  - Falls back to list --json + filter by name for real limactl
+  - Returns `ErrVMNotFound` if VM not in list
+- `parseListOutput()` now supports three formats:
+  - JSONL (one JSON object per line) — real `limactl list --json`
+  - JSON array — mock `limactl list --json`
+  - Tab-separated text — fallback
+- Added `parseResourceField()` to handle both int64 bytes (real limactl) and string (mock) for memory/disk
+- Added `formatBytes()` to convert bytes to human-readable GiB strings
+- `getSSHPort()` updated to parse both JSONL and JSON array, handles `sshLocalPort` (real) and `ssh` (mock) fields
+
+### Snapshot commands fixed for real limactl (REQ-003-008, REQ-003-018)
+- `internal/backend/lima/lima.go`: Snapshot commands now use `--tag <tag>` flag format matching real limactl
+  - `SnapshotCreate`: `limactl snapshot create <name> --tag <tag>` (was positional)
+  - `SnapshotApply`: `limactl snapshot apply <name> --tag <tag>` (was `restore` with positional)
+  - `SnapshotDelete`: `limactl snapshot delete <name> --tag <tag>` (was positional)
+- `internal/backend/lima/mocklimactl/mocklimactl.go`:
+  - Added `parseNameTag()` helper supporting both `--tag <tag>` and legacy positional formats
+  - Added `"apply"` as alias for `"restore"` in snapshot dispatch
+  - Updated all snapshot handlers to use `parseNameTag()`
+
+## Remaining Gaps (Not Yet Implemented)
+
+### CRITICAL: SSH key generation not wired into create (REQ-007-003)
+- `ssh.GenerateKeys()` exists and is tested but NEVER called during `sd create`
+- Keys should be generated at `~/.sd/vms/<name>/ssh/id_ed25519(.pub)` after VM creation
+- Public key must be injected into VM's `~/.ssh/authorized_keys` for SSH to work
+- Without this, the `sd connect` command cannot authenticate
+
+### CRITICAL: SSH config fragment not generated on create (REQ-007-004)
+- `ssh.WriteFragment()` and `ssh.GenerateFragment()` exist and are tested but not called
+- Fragment should be written to `~/.ssh/config.d/sd-<name>` after creation
+- Without this, standard SSH tools cannot connect to the VM
+
+### CRITICAL: Public key injection into VM (REQ-007-003)
+- No code injects the generated public key into the VM's authorized_keys
+- Options: via base.yaml provisioning script, or via Lima's SSH key mechanisms
+
+### DONE: Default provisioning now uses security-focused module set (REQ-004-006, REQ-004-025, REQ-004-026)
+- Added `provision.DefaultModuleNames` = ["base", "ssh-hardening", "dns-filter", "egress"]
+- When no `--modules` specified, only default set runs (not all 10 modules)
+- App modules (docker, golang, rust, python, github-cli, claude-code) are opt-in via `--modules`
+- Updated tests to use explicit `--modules base` where mock module list is limited
+
+### MEDIUM: Session manager not used by connect command (REQ-007-008)
+- `internal/session/` package exists with Manager type but connect.go builds tmux commands inline
+- Should use session.Manager for consistent error handling and validation
+
+### LOW: Sync --watch flag not functional (REQ-007-015)
+- Flag declared but not implemented; silently ignored
+
+### LOW: State Manager component missing (REQ-001-001)
+- Architecture spec lists "State Manager" but no `internal/state/` package exists
+- VM metadata managed ad-hoc through config files
