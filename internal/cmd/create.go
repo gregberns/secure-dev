@@ -355,7 +355,10 @@ func runCreateProvision(ctx context.Context, f *ui.Formatter, b backend.Backend,
 	}
 
 	var resolved []provision.Module
-	if len(modulesFlag) > 0 {
+	if len(modulesFlag) == 1 && strings.TrimSpace(modulesFlag[0]) == "all" {
+		// REQ-006-015: --modules all provisions every available module
+		resolved, err = provision.ResolveAll(allModules)
+	} else if len(modulesFlag) > 0 {
 		// Trim whitespace from module names
 		requested := make([]string, len(modulesFlag))
 		for i, m := range modulesFlag {

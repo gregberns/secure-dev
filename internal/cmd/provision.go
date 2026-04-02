@@ -138,15 +138,15 @@ func runProvision(cmd *cobra.Command, args []string) error {
 	// Resolve which modules to run
 	modulesFlag, _ := cmd.Flags().GetString("modules")
 	var resolved []provision.Module
-	if modulesFlag != "" {
+	if modulesFlag == "all" || modulesFlag == "" {
+		// REQ-006-015: --modules all (or no flag) provisions every available module
+		resolved, err = provision.ResolveAll(allModules)
+	} else {
 		requested := strings.Split(modulesFlag, ",")
-		// Trim whitespace
 		for i := range requested {
 			requested[i] = strings.TrimSpace(requested[i])
 		}
 		resolved, err = provision.ResolveRequested(allModules, requested)
-	} else {
-		resolved, err = provision.ResolveAll(allModules)
 	}
 	if err != nil {
 		return ui.CLIError{
