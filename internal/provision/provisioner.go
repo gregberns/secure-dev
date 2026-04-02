@@ -6,6 +6,7 @@ package provision
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -41,8 +42,11 @@ func Provision(ctx context.Context, execFn ExecFunc, vmName string, modules []Mo
 		modState.StartedAt = &startTime
 		state.Modules = append(state.Modules, modState)
 
+		// REQ-004-028: Inject checksum env vars before script execution.
+		checksumBlock := checksumEnvBlock(mod.Checksums)
+
 		for scriptIdx, s := range mod.Scripts {
-			script := prependScriptPreamble(s.Script)
+			script := checksumBlock + prependScriptPreamble(s.Script)
 			var cmd []string
 			if s.Mode == ModeSystem {
 				cmd = []string{"sudo", "bash", "-c", script}
@@ -102,6 +106,38 @@ func Provision(ctx context.Context, execFn ExecFunc, vmName string, modules []Mo
 // REQ-006-005: All provisioning scripts execute with set -eux -o pipefail.
 func prependScriptPreamble(script string) string {
 	return "set -eux -o pipefail\n" + script
+}
+
+// checksumEnvBlock generates shell export statements for a module's checksums.
+// Each checksum key (typically a filename like "go1.23.4.linux-arm64.tar.gz") is
+// converted to an environment variable name with the CHECKSUM_ prefix.
+// REQ-004-028: Checksum verification for downloaded binaries.
+func checksumEnvBlock(checksums map[string]string) string {
+	if len(checksums) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(checksums))
+	for k := range checksums {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var lines []string
+	for _, k := range keys {
+		envName := checksumKeyToEnvVar(k)
+		lines = append(lines, fmt.Sprintf("export %s=%q", envName, checksums[k]))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// checksumKeyToEnvVar converts a checksum filename key to a shell environment
+// variable name. Dots and hyphens become underscores; the result is uppercased
+// and prefixed with CHECKSUM_.
+// Example: "go1.23.4.linux-arm64.tar.gz" -> "CHECKSUM_GO1_23_4_LINUX_ARM64_TAR_GZ"
+func checksumKeyToEnvVar(key string) string {
+	result := strings.ToUpper(key)
+	result = strings.NewReplacer(".", "_", "-", "_").Replace(result)
+	return "CHECKSUM_" + result
 }
 
 // FormatModuleList renders a module list for human output.

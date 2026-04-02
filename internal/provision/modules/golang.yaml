@@ -13,6 +13,9 @@ scripts:
       ARCH="$(dpkg --print-architecture)"
       curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
         -o /tmp/go.tar.gz
+      GO_TARBALL="go${GO_VERSION}.linux-${ARCH}.tar.gz"
+      GO_CHECKSUM_KEY="CHECKSUM_$(echo "$GO_TARBALL" | tr '.-' '__' | tr '[:lower:]' '[:upper:]')"
+      GO_CHECKSUM="${!GO_CHECKSUM_KEY}"
       echo "${GO_CHECKSUM}  /tmp/go.tar.gz" | sha256sum -c -
       rm -rf /usr/local/go
       tar -C /usr/local -xzf /tmp/go.tar.gz
