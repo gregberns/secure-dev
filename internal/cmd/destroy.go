@@ -155,6 +155,13 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-001-008: Remove full VM config directory
+	if l := Loader(); l != nil {
+		if err := l.RemoveVMConfig(name); err != nil {
+			f.Progress(fmt.Sprintf("Warning: failed to remove VM config directory: %v", err))
+		}
+	}
+
 	type destroyResult struct {
 		Name        string `json:"name"`
 		SnapshotTag string `json:"snapshot_tag,omitempty"` // REQ-004-019

@@ -680,6 +680,103 @@ func (l *Loader) ReadVMConfig(name string) (*VMConfig, error) {
 	return &cfg, nil
 }
 
+// WriteCredentials writes credential environment variables to
+// $SD_HOME/vms/<name>/credentials.yaml with 0600 permissions.
+// REQ-004-011: Credentials stored separately from VM config.
+func (l *Loader) WriteCredentials(name string, creds map[string]string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	dir := filepath.Join(l.sdHome, "vms", name)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create VM directory: %w", err)
+	}
+
+	data, err := yaml.Marshal(creds)
+	if err != nil {
+		return fmt.Errorf("marshal credentials: %w", err)
+	}
+
+	filePath := filepath.Join(dir, "credentials.yaml")
+	tmpPath := filePath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("create credentials file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write credentials: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close credentials file: %w", err)
+	}
+	return os.Rename(tmpPath, filePath)
+}
+
+// ReadCredentials reads credential environment variables from
+// $SD_HOME/vms/<name>/credentials.yaml. Falls back to config.yaml env
+// section for backward compatibility with VMs created before credential separation.
+// REQ-004-011
+func (l *Loader) ReadCredentials(name string) (map[string]string, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	// Try credentials.yaml first
+	credPath := filepath.Join(l.sdHome, "vms", name, "credentials.yaml")
+	if data, err := os.ReadFile(credPath); err == nil {
+		var creds map[string]string
+		if err := yaml.Unmarshal(data, &creds); err != nil {
+			return nil, fmt.Errorf("parse credentials file: %w", err)
+		}
+		if creds == nil {
+			return make(map[string]string), nil
+		}
+		return creds, nil
+	}
+
+	// Fall back to config.yaml env section
+	configPath := filepath.Join(l.sdHome, "vms", name, "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]string), nil
+		}
+		return nil, fmt.Errorf("read VM config: %w", err)
+	}
+	var cfg struct {
+		Env map[string]string `yaml:"env"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return make(map[string]string), nil
+	}
+	if cfg.Env == nil {
+		return make(map[string]string), nil
+	}
+	return cfg.Env, nil
+}
+
+// UpdateVMState reads the VM config, applies the state function, and writes it back.
+// REQ-005-007: VM state lifecycle tracking.
+func (l *Loader) UpdateVMState(name string, updateFn func(*VMState)) error {
+	cfg, err := l.ReadVMConfig(name)
+	if err != nil {
+		return err
+	}
+	updateFn(&cfg.State)
+	return l.WriteVMConfig(cfg)
+}
+
+// RemoveVMConfig removes the entire VM configuration directory.
+// REQ-001-008: State cleanup on destroy.
+func (l *Loader) RemoveVMConfig(name string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	dir := filepath.Join(l.sdHome, "vms", name)
+	return os.RemoveAll(dir)
+}
+
 // EnsureSDHome creates the SD_HOME directory with correct permissions if it
 // does not exist. REQ-005-016
 func (l *Loader) EnsureSDHome() error {

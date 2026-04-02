@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/config"
 	"sd/internal/security"
 	"sd/internal/ui"
 )
@@ -125,6 +126,14 @@ func runStop(cmd *cobra.Command, args []string) error {
 			Code:    "vm_stop_failed",
 			Message: fmt.Sprintf("failed to stop VM %q: %v", name, err),
 		}
+	}
+
+	// REQ-005-007: Track VM state
+	if l := Loader(); l != nil {
+		_ = l.UpdateVMState(name, func(s *config.VMState) {
+			s.Status = config.VMStatusStopped
+			s.LastStopped = time.Now()
+		})
 	}
 
 	// REQ-004-022: Log VM lifecycle event

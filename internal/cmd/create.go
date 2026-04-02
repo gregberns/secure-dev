@@ -43,6 +43,7 @@ The VM is provisioned using the configured backend (default: lima).`,
 	createCmd.Flags().StringSlice("modules", nil, "provisioning modules to apply (comma-separated)")
 	createCmd.Flags().StringArray("mount", nil, "mount host:guest[:ro|rw] (repeatable)")
 	createCmd.Flags().StringArray("allow-egress", nil, "add domain to egress allowlist (repeatable)")
+	createCmd.Flags().Bool("dry-run", false, "print resolved config without creating VM")
 
 	rootCmd.AddCommand(createCmd)
 }
@@ -112,6 +113,34 @@ func runCreate(cmd *cobra.Command, args []string) error {
 				Message: err.Error(),
 			}
 		}
+	}
+
+	// REQ-001-006: --dry-run prints resolved config and exits
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	if dryRun {
+		type dryRunResult struct {
+			Name    string `json:"name"`
+			Backend string `json:"backend"`
+			CPUs    int    `json:"cpus"`
+			Memory  string `json:"memory"`
+			Disk    string `json:"disk"`
+			Image   string `json:"image"`
+			DryRun  bool   `json:"dry_run"`
+		}
+		result := dryRunResult{
+			Name:    name,
+			Backend: backendName,
+			CPUs:    vmCfg.CPUs,
+			Memory:  vmCfg.Memory,
+			Disk:    vmCfg.Disk,
+			Image:   vmCfg.BaseImage,
+			DryRun:  true,
+		}
+		f.SuccessData(result, func() string {
+			return fmt.Sprintf("Dry run: VM %q would be created with backend=%s cpus=%d memory=%s disk=%s image=%s\n",
+				name, backendName, vmCfg.CPUs, vmCfg.Memory, vmCfg.Disk, vmCfg.BaseImage)
+		})
+		return nil
 	}
 
 	b, err := getBackendFunc(backendName)
@@ -191,6 +220,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// REQ-001-006 step 6: Persist VM configuration
+	// REQ-005-007: Set initial VM state
 	if l := Loader(); l != nil {
 		vmConfigPersist := &config.VMConfig{
 			Name:    name,
@@ -199,6 +229,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			Memory:  vmCfg.Memory,
 			Disk:    vmCfg.Disk,
 			Image:   vmCfg.BaseImage,
+			State: config.VMState{
+				Status:      config.VMStatusRunning,
+				CreatedAt:   time.Now(),
+				LastStarted: time.Now(),
+			},
 		}
 		if len(modulesFlag) > 0 {
 			vmConfigPersist.Provisions = modulesFlag
