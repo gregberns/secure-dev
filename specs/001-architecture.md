@@ -340,22 +340,24 @@ internal/
       docker.go
     incus/                   # Incus backend stub
       incus.go
-  config/                    # Viper-based config loading (spec 005)
-    config.go                # Load, merge, validate
+  config/                    # Viper-based config loading and VM state (spec 005)
+    types.go                 # Config types, VM config types
     defaults.go              # Built-in default values
+    resolve.go               # Environment variable resolution
+    loader.go                # Config/VM state loading from disk
   provision/                 # Guest provisioning (spec 006)
-    provision.go             # Provisioning engine interface and orchestration
-    scripts/                 # Embedded provisioning scripts
-  connection/                # SSH and session management (spec 007)
-    connect.go               # SSH connection establishment
-    keys.go                  # Key generation and storage
-    sync.go                  # File synchronization
+    module.go                # Module definition, parsing, validation
+    provisioner.go           # Provisioning execution engine
+    resolver.go              # Dependency resolution
+    modules/                 # Embedded provisioning module YAML files
+  ssh/                       # SSH key and config management (spec 007)
+    ssh.go                   # Key generation, config fragments, host keys
+  session/                   # tmux/session management (spec 007)
+    session.go               # tmux session management
   security/                  # Security controls (spec 004)
     egress.go                # Egress policy enforcement
     credentials.go           # Credential injection
     audit.go                 # Audit logging
-  state/                     # VM state persistence
-    state.go                 # Read/write VM config.yaml
   ui/                        # Terminal output and formatting
     output.go                # Human-readable output
     json.go                  # JSON output mode
