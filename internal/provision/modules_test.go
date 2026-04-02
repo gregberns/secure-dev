@@ -587,8 +587,9 @@ func TestLoadBuiltinModules_EgressSystemMode(t *testing.T) {
 		}
 	}
 	require.NotNil(t, egress)
-	assert.Len(t, egress.Scripts, 1)
-	assert.Equal(t, ModeSystem, egress.Scripts[0].Mode, "egress must run as system mode")
+	assert.Len(t, egress.Scripts, 2, "egress should have 2 system-mode scripts (firewall + DNS refresh)")
+	assert.Equal(t, ModeSystem, egress.Scripts[0].Mode, "egress script 1 must run as system mode")
+	assert.Equal(t, ModeSystem, egress.Scripts[1].Mode, "egress script 2 (DNS refresh) must run as system mode")
 }
 
 func TestLoadBuiltinModules_EgressDependsOnDnsFilter(t *testing.T) {
@@ -671,6 +672,140 @@ func TestLoadBuiltinModules_EgressPersistsRules(t *testing.T) {
 		allScripts += s.Script + " "
 	}
 	assert.Contains(t, allScripts, "iptables-save", "must persist rules across reboots")
+}
+
+// --- REQ-004-010: DNS Periodic Re-resolution Tests ---
+
+func TestLoadBuiltinModules_EgressDnsRefreshScript(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	require.Len(t, egress.Scripts, 2, "egress must have 2 scripts")
+
+	refreshScript := egress.Scripts[1].Script
+	assert.Contains(t, refreshScript, "/usr/local/sbin/sd-egress-refresh",
+		"must install refresh script at /usr/local/sbin/sd-egress-refresh")
+	assert.Contains(t, refreshScript, "chmod 700",
+		"refresh script must be root-only (0700)")
+	assert.Contains(t, refreshScript, "chown root:root",
+		"refresh script must be owned by root")
+}
+
+func TestLoadBuiltinModules_EgressDnsRefreshTimer(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	require.Len(t, egress.Scripts, 2)
+
+	refreshScript := egress.Scripts[1].Script
+	assert.Contains(t, refreshScript, "sd-egress-refresh.service",
+		"must install systemd service unit")
+	assert.Contains(t, refreshScript, "sd-egress-refresh.timer",
+		"must install systemd timer unit")
+	assert.Contains(t, refreshScript, "OnUnitActiveSec=5min",
+		"timer must fire every 5 minutes (REQ-004-010)")
+	assert.Contains(t, refreshScript, "systemctl enable --now sd-egress-refresh.timer",
+		"timer must be enabled and started")
+}
+
+func TestLoadBuiltinModules_EgressDnsRefreshReResolveDomains(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	require.Len(t, egress.Scripts, 2)
+
+	refreshScript := egress.Scripts[1].Script
+	defaultDomains := []string{
+		"api.anthropic.com", "github.com", "archive.ubuntu.com",
+		"security.ubuntu.com", "deb.debian.org", "registry.npmjs.org",
+		"pypi.org", "files.pythonhosted.org", "proxy.golang.org", "sum.golang.org",
+		"raw.githubusercontent.com", "objects.githubusercontent.com",
+	}
+	for _, domain := range defaultDomains {
+		assert.Contains(t, refreshScript, domain,
+			"refresh script must re-resolve %q (REQ-004-010)", domain)
+	}
+	assert.Contains(t, refreshScript, "dig +short",
+		"refresh script must use dig to resolve domains")
+}
+
+func TestLoadBuiltinModules_EgressDnsRefreshDefaultDeny(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	require.Len(t, egress.Scripts, 2)
+
+	refreshScript := egress.Scripts[1].Script
+	assert.Contains(t, refreshScript, "iptables -F sd-egress",
+		"refresh script must flush the chain")
+	assert.Contains(t, refreshScript, "iptables -A sd-egress -j DROP",
+		"refresh script must immediately add DROP after flush (never open)")
+	assert.Contains(t, refreshScript, "iptables -I sd-egress",
+		"refresh script must insert ACCEPT rules before DROP")
+}
+
+func TestLoadBuiltinModules_EgressDnsRefreshPreservesConnections(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	require.Len(t, egress.Scripts, 2)
+
+	refreshScript := egress.Scripts[1].Script
+	assert.Contains(t, refreshScript, "ESTABLISHED,RELATED",
+		"refresh script must preserve established connections (REQ-004-010)")
+}
+
+func TestLoadBuiltinModules_EgressDnsRefreshLogsChanges(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	var egress *Module
+	for i := range modules {
+		if modules[i].Name == "egress" {
+			egress = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, egress)
+	require.Len(t, egress.Scripts, 2)
+
+	refreshScript := egress.Scripts[1].Script
+	assert.Contains(t, refreshScript, "logger -t sd-egress",
+		"refresh script must log via syslog (REQ-004-010)")
 }
 
 func TestLoadBuiltinModules_EgressIdempotent(t *testing.T) {
