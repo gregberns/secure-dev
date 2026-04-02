@@ -6,6 +6,9 @@ import (
 	"sd/internal/cmd"
 
 	// Register backends via init() functions.
+	_ "sd/internal/backend/avf"
+	_ "sd/internal/backend/docker"
+	_ "sd/internal/backend/incus"
 	_ "sd/internal/backend/lima"
 )
 
