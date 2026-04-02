@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
 	"sd/internal/ui"
@@ -118,7 +120,11 @@ func runSyncTo(cmd *cobra.Command, args []string) error {
 	}
 
 	// REQ-007-015: Sync host -> guest
-	if err := syncer.SyncTo(cmd.Context(), name, hostPath, guestPath); err != nil {
+	syncOnce := func() error {
+		return syncer.SyncTo(cmd.Context(), name, hostPath, guestPath)
+	}
+
+	if err := syncOnce(); err != nil {
 		if errors.Is(err, backend.ErrVMNotFound) {
 			return ui.CLIError{
 				Code:    "vm_not_found",
@@ -155,7 +161,13 @@ func runSyncTo(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stdout, "Synced %s -> %s:%s\n", hostPath, name, guestPath)
 	}
 
-	return nil
+	// REQ-007-018: Watch mode — continuously sync on file changes
+	watch, _ := cmd.Flags().GetBool("watch")
+	if !watch {
+		return nil
+	}
+
+	return watchAndSync(cmd.Context(), f, hostPath, name, guestPath, syncOnce)
 }
 
 // runSyncFrom implements "sd sync from".
@@ -295,6 +307,80 @@ func runSyncFrom(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// watchAndSync watches hostPath for changes and re-syncs with debounce.
+// REQ-007-018: Watch mode with fsnotify, 500ms debounce, error recovery.
+func watchAndSync(ctx context.Context, f *ui.Formatter, hostPath, vmName, guestPath string, syncFn func() error) error {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return ui.CLIError{
+			Code:    "sync_failed",
+			Message: fmt.Sprintf("failed to create file watcher: %v", err),
+		}
+	}
+	defer watcher.Close()
+
+	// Add the host path and any subdirectories
+	if err := addWatchRecursive(watcher, hostPath); err != nil {
+		return ui.CLIError{
+			Code:    "sync_failed",
+			Message: fmt.Sprintf("failed to watch %s: %v", hostPath, err),
+		}
+	}
+
+	f.Progress(fmt.Sprintf("Watching %s for changes (Ctrl-C to stop)...", hostPath))
+
+	debounce := time.NewTimer(0)
+	if !debounce.Stop() {
+		<-debounce.C
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil
+			}
+			// On any write/create/remove, debounce and re-sync
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+				// If a new directory was created, watch it too
+				if event.Has(fsnotify.Create) {
+					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+						_ = addWatchRecursive(watcher, event.Name)
+					}
+				}
+				debounce.Reset(500 * time.Millisecond)
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return nil
+			}
+			f.Progress(fmt.Sprintf("Watch error: %v", err))
+		case <-debounce.C:
+			// REQ-007-018: Error recovery — log and continue on failed rsync
+			if err := syncFn(); err != nil {
+				f.Progress(fmt.Sprintf("Sync failed (will retry on next change): %v", err))
+			} else {
+				f.Progress(fmt.Sprintf("Synced %s -> %s:%s", hostPath, vmName, guestPath))
+			}
+		}
+	}
+}
+
+// addWatchRecursive adds a path and all subdirectories to the watcher.
+func addWatchRecursive(watcher *fsnotify.Watcher, root string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip inaccessible paths
+		}
+		if info.IsDir() {
+			return watcher.Add(path)
+		}
+		return nil
+	})
 }
 
 // resolveSyncBackend resolves the backend for sync operations.
