@@ -7,13 +7,12 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"sd/internal/backend"
+	"sd/internal/config"
 	"sd/internal/security"
 	"sd/internal/ui"
 )
@@ -52,49 +51,15 @@ var readVMEnvFunc = defaultReadVMEnv
 // Overridden in tests with a digital twin.
 var writeVMEnvFunc = defaultWriteVMEnv
 
+// REQ-004-011: Credentials stored in dedicated credentials.yaml
 func defaultReadVMEnv(sdHome, vmName string) (map[string]string, error) {
-	path := filepath.Join(sdHome, "vms", vmName, "config.yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return make(map[string]string), nil
-		}
-		return nil, fmt.Errorf("cannot read VM config: %w", err)
-	}
-	v := viper.New()
-	v.SetConfigType("yaml")
-	if err := v.ReadConfig(strings.NewReader(string(data))); err != nil {
-		return nil, fmt.Errorf("cannot parse VM config: %w", err)
-	}
-	env := v.GetStringMapString("env")
-	if env == nil {
-		env = make(map[string]string)
-	}
-	return env, nil
+	l := config.NewLoader(config.WithSDHome(sdHome))
+	return l.ReadCredentials(vmName)
 }
 
 func defaultWriteVMEnv(sdHome, vmName string, env map[string]string) error {
-	dir := filepath.Join(sdHome, "vms", vmName)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("cannot create VM config directory: %w", err)
-	}
-
-	path := filepath.Join(dir, "config.yaml")
-	v := viper.New()
-	v.SetConfigType("yaml")
-
-	// Load existing config to preserve other fields
-	if data, err := os.ReadFile(path); err == nil {
-		v.ReadConfig(strings.NewReader(string(data)))
-	}
-
-	v.Set("env", env)
-
-	if err := v.WriteConfigAs(path); err != nil {
-		return fmt.Errorf("cannot write VM config: %w", err)
-	}
-	os.Chmod(path, 0600)
-	return nil
+	l := config.NewLoader(config.WithSDHome(sdHome))
+	return l.WriteCredentials(vmName, env)
 }
 
 func init() {
@@ -200,8 +165,11 @@ func runTokenGithubSetup(cmd *cobra.Command, args []string) error {
 		Notes: []string{
 			"Create a fine-grained PAT scoped to specific repositories only.",
 			"Do NOT use a classic PAT (ghp_ prefix) -- fine-grained tokens (github_pat_ prefix) provide better security.",
-			"Enable branch protection on main/master before granting write access.",
+			"Enable branch protection on target repositories before granting write access to the token.",
 			"Set GITHUB_TOKEN=<your-token> in your host environment, then run: sd token rotate <vm>",
+			"Consider using a dedicated bot account rather than your personal account for CI tokens.",
+			"For automated workflows, create a dedicated GitHub bot account and use its fine-grained PAT.",
+			"Bot account tokens can be scoped to specific repositories without affecting your personal account.",
 		},
 	}
 
