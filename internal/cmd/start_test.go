@@ -193,6 +193,7 @@ func TestStartCommand_VMNotFound(t *testing.T) {
 	assert.Contains(t, cliErr.Message, "nonexistent")
 }
 
+// REQ-003-003: Start on a running VM is a no-op (silent success)
 func TestStartCommand_AlreadyRunning(t *testing.T) {
 	mb := &mockStartBackend{
 		name:      "mock",
@@ -205,11 +206,7 @@ func TestStartCommand_AlreadyRunning(t *testing.T) {
 	root.SetArgs([]string{"start", "testvm"})
 	err := root.Execute()
 
-	require.Error(t, err)
-	cliErr, ok := err.(ui.CLIError)
-	require.True(t, ok)
-	assert.Equal(t, "vm_already_running", cliErr.Code)
-	assert.Contains(t, cliErr.Message, "testvm")
+	require.NoError(t, err, "start on running VM must succeed (no-op)")
 
 	// Verify backend Start was NOT called
 	assert.Empty(t, mb.started, "Start must not be called when VM is already running")
@@ -437,21 +434,7 @@ func TestProperty_StartErrorCodesSnakeCase(t *testing.T) {
 		assert.Equal(t, "vm_not_found", cliErr.Code)
 	})
 
-	t.Run("vm_already_running", func(t *testing.T) {
-		mb := &mockStartBackend{
-			name:      "mock",
-			available: true,
-			statusMap: map[string]backend.VMStatus{"test": backend.StatusRunning},
-		}
-		setupStartTest(t, mb)
-
-		root := RootCmd()
-		root.SetArgs([]string{"start", "test"})
-		err := root.Execute()
-		require.Error(t, err)
-		cliErr := err.(ui.CLIError)
-		assert.Equal(t, "vm_already_running", cliErr.Code)
-	})
+	// NOTE: vm_already_running removed — REQ-003-003 makes it a no-op (not an error)
 
 	t.Run("backend_unavailable", func(t *testing.T) {
 		mb := &mockStartBackend{name: "mock", available: false}
@@ -479,6 +462,7 @@ func TestProperty_StartErrorCodesSnakeCase(t *testing.T) {
 }
 
 // Property: start on a running VM never calls the backend Start method.
+// REQ-003-003: Start on a running VM is a no-op (silent success)
 func TestProperty_StartRunningVM_NeverCallsBackend(t *testing.T) {
 	names := []string{"vm1", "vm2", "important", "prod"}
 	for _, name := range names {
@@ -493,7 +477,7 @@ func TestProperty_StartRunningVM_NeverCallsBackend(t *testing.T) {
 			root := RootCmd()
 			root.SetArgs([]string{"start", name})
 			err := root.Execute()
-			require.Error(t, err)
+			require.NoError(t, err, "start on running VM must succeed (no-op) for %q", name)
 			assert.Empty(t, mb.started, "start on running VM must not call backend.Start for %q", name)
 		})
 	}
@@ -559,8 +543,9 @@ func TestProperty_StartJSONRequiredFields(t *testing.T) {
 	assert.Contains(t, data, "status", "data must have 'status' field")
 }
 
-// Property: error JSON format is consistent for already-running case.
-func TestProperty_StartErrorJSONFormat(t *testing.T) {
+// Property: JSON output for already-running VM returns success with status=running.
+// REQ-003-003: Start on a running VM is a no-op (silent success)
+func TestProperty_StartAlreadyRunningJSONFormat(t *testing.T) {
 	mb := &mockStartBackend{
 		name:      "mock",
 		available: true,
@@ -568,15 +553,29 @@ func TestProperty_StartErrorJSONFormat(t *testing.T) {
 	}
 	setupStartTest(t, mb)
 
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
 	root := RootCmd()
-	root.SetArgs([]string{"start", "testvm"})
+	root.SetArgs([]string{"--json", "start", "testvm"})
 	execErr := root.Execute()
 
-	require.Error(t, execErr)
+	w.Close()
+	os.Stdout = oldStdout
 
-	// Verify the CLIError structure
-	cliErr, ok := execErr.(ui.CLIError)
-	require.True(t, ok)
-	assert.Equal(t, "vm_already_running", cliErr.Code)
-	assert.Contains(t, cliErr.Message, "testvm")
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "testvm", data["name"])
+	assert.Equal(t, "running", data["status"])
 }

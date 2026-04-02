@@ -19,7 +19,7 @@ func init() {
 		Short: "Start a stopped VM",
 		Long: `Start a stopped VM, transitioning it to Running state.
 
-If the VM is already running, this command reports an error.`,
+If the VM is already running, this is a no-op (silent success).`,
 		GroupID: "vm",
 		Args:    cobra.ExactArgs(1),
 		RunE:    runStart,
@@ -93,11 +93,23 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-003-003: Start on a running VM is a no-op (silent success)
 	if status == backend.StatusRunning {
-		return ui.CLIError{
-			Code:    "vm_already_running",
-			Message: fmt.Sprintf("VM %q is already running", name),
+		// REQ-004-022: Log VM lifecycle event (already running)
+		if al := AuditLog(); al != nil {
+			_ = al.LogEvent(security.EventLogEntry{
+				Timestamp: time.Now(),
+				EventType: "vm.start",
+				VMName:    name,
+			})
 		}
+		type startResult struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		}
+		result := startResult{Name: name, Status: string(backend.StatusRunning)}
+		f.SuccessData(result, func() string { return "" })
+		return nil
 	}
 
 	f.Progress(fmt.Sprintf("Starting VM %q...", name))
