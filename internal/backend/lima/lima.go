@@ -537,6 +537,7 @@ func (b *limaBackend) generateLimaYAML(name string, cfg backend.VMConfig) (strin
 	// REQ-003-016
 	if isAppleSilicon() {
 		builder.WriteString("vmType: \"vz\"\n")
+		builder.WriteString("mountType: \"virtiofs\"\n") // REQ-003-016: VZ requires virtiofs
 	} else {
 		builder.WriteString("vmType: \"qemu\"\n")
 	}
@@ -546,13 +547,19 @@ func (b *limaBackend) generateLimaYAML(name string, cfg backend.VMConfig) (strin
 	builder.WriteString(fmt.Sprintf("memory: \"%s\"\n", cfg.Memory))
 	builder.WriteString(fmt.Sprintf("disk: \"%s\"\n", cfg.Disk))
 
-	// Images - resolve short name to URL
-	// REQ-003-024
-	imageURL, err := resolveBaseImage(cfg.BaseImage)
+	// Images - resolve short name to URL(s)
+	// REQ-003-024: Multi-architecture base image support
+	imageEntries, err := resolveBaseImage(cfg.BaseImage)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve base image: %w", err)
 	}
-	builder.WriteString(fmt.Sprintf("images:\n  - location: \"%s\"\n", imageURL))
+	builder.WriteString("images:\n")
+	for _, entry := range imageEntries {
+		builder.WriteString(fmt.Sprintf("  - location: \"%s\"\n", entry.Location))
+		if entry.Arch != "" {
+			builder.WriteString(fmt.Sprintf("    arch: \"%s\"\n", entry.Arch))
+		}
+	}
 
 	// Mounts - empty by default for security
 	// REQ-003-011, REQ-003-017
@@ -604,26 +611,42 @@ var isVSOCKTransport = func() bool {
 	return isAppleSilicon()
 }
 
-// resolveBaseImage resolves a short name to a Lima image URL.
+// imageEntry represents a single image location with optional architecture.
+// REQ-003-024: Multi-architecture base image support.
+type imageEntry struct {
+	Location string
+	Arch     string // "aarch64", "x86_64", or "" for custom URLs
+}
+
+// resolveBaseImage resolves a short name to Lima image entries.
 // REQ-003-024: Base Image Resolution
-func resolveBaseImage(name string) (string, error) {
-	// Built-in mapping from short names to Lima-compatible URLs
-	images := map[string]string{
-		"ubuntu:24.04": "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img",
-		"ubuntu:22.04": "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-arm64.img",
-		"debian:12":    "https://cloud.debian.org/images/cloud/bookworm/daily/latest/arm64/disk.qcow2",
+func resolveBaseImage(name string) ([]imageEntry, error) {
+	// Built-in mapping from short names to per-architecture URLs
+	images := map[string][]imageEntry{
+		"ubuntu:24.04": {
+			{Location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img", Arch: "aarch64"},
+			{Location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img", Arch: "x86_64"},
+		},
+		"ubuntu:22.04": {
+			{Location: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-arm64.img", Arch: "aarch64"},
+			{Location: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img", Arch: "x86_64"},
+		},
+		"debian:12": {
+			{Location: "https://cloud.debian.org/images/cloud/bookworm/daily/latest/arm64/disk.qcow2", Arch: "aarch64"},
+			{Location: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2", Arch: "x86_64"},
+		},
 	}
 
-	if url, ok := images[name]; ok {
-		return url, nil
+	if entries, ok := images[name]; ok {
+		return entries, nil
 	}
 
-	// If it looks like a URL, pass through
+	// If it looks like a URL, pass through without arch
 	if strings.HasPrefix(name, "http://") || strings.HasPrefix(name, "https://") {
-		return name, nil
+		return []imageEntry{{Location: name}}, nil
 	}
 
-	return "", fmt.Errorf("unknown base image %q; available: %v", name, getAvailableImages())
+	return nil, fmt.Errorf("unknown base image %q; available: %v", name, getAvailableImages())
 }
 
 // getAvailableImages returns the list of known image short names.

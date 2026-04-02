@@ -40,15 +40,27 @@ func TestLimaYAML_VZDefaultOnAppleSilicon(t *testing.T) {
 		t.Error("YAML missing vmType field")
 	}
 
-	// On the current platform, verify the correct vmType
+	// On the current platform, verify the correct vmType and mountType
 	vmTypeLine := findYAMLLine(yaml, "vmType:")
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 		if !strings.Contains(vmTypeLine, "vz") {
 			t.Errorf("on darwin/arm64, vmType = %q, want \"vz\"", extractYAMLValue(vmTypeLine))
 		}
+		// REQ-003-016: VZ requires virtiofs mount type
+		mountTypeLine := findYAMLLine(yaml, "mountType:")
+		if mountTypeLine == "" {
+			t.Error("on darwin/arm64, YAML missing mountType field")
+		} else if !strings.Contains(mountTypeLine, "virtiofs") {
+			t.Errorf("on darwin/arm64, mountType = %q, want \"virtiofs\"", extractYAMLValue(mountTypeLine))
+		}
 	} else {
 		if !strings.Contains(vmTypeLine, "qemu") {
 			t.Errorf("on %s/%s, vmType = %q, want \"qemu\"", runtime.GOOS, runtime.GOARCH, extractYAMLValue(vmTypeLine))
+		}
+		// Verify mountType is NOT set for non-VZ backends
+		mountTypeLine := findYAMLLine(yaml, "mountType:")
+		if mountTypeLine != "" {
+			t.Errorf("on %s/%s, mountType should not be set but got %q", runtime.GOOS, runtime.GOARCH, extractYAMLValue(mountTypeLine))
 		}
 	}
 }
