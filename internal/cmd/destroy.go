@@ -5,6 +5,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -141,6 +143,15 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		sdHome := l.SDHome()
 		if err := removeSSHDir(sdHome, name); err != nil {
 			f.Progress(fmt.Sprintf("Warning: failed to clean up SSH directory: %v", err))
+		}
+	}
+
+	// REQ-007-004: Remove SSH config fragment to avoid orphaned entries
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		sshDir := filepath.Join(home, ".ssh")
+		if err := ssh.RemoveFragment(sshDir, name); err != nil {
+			f.Progress(fmt.Sprintf("Warning: failed to remove SSH config fragment: %v", err))
 		}
 	}
 

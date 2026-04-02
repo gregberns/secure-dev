@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/config"
 	"sd/internal/provision"
 	"sd/internal/security"
 	"sd/internal/ssh"
@@ -189,6 +190,24 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		Disk    string `json:"disk"`
 	}
 
+	// REQ-001-006 step 6: Persist VM configuration
+	if l := Loader(); l != nil {
+		vmConfigPersist := &config.VMConfig{
+			Name:    name,
+			Backend: backendName,
+			CPUs:    vmCfg.CPUs,
+			Memory:  vmCfg.Memory,
+			Disk:    vmCfg.Disk,
+			Image:   vmCfg.BaseImage,
+		}
+		if len(modulesFlag) > 0 {
+			vmConfigPersist.Provisions = modulesFlag
+		}
+		if err := l.WriteVMConfig(vmConfigPersist); err != nil {
+			f.Progress(fmt.Sprintf("Warning: could not persist VM config: %v", err))
+		}
+	}
+
 	// REQ-004-022: Log VM lifecycle event
 	if al := AuditLog(); al != nil {
 		_ = al.LogEvent(security.EventLogEntry{
@@ -275,6 +294,14 @@ func setupSSH(ctx context.Context, f *ui.Formatter, b backend.Backend, name, sdH
 	}
 	if err := ssh.WriteFragment(sshDir, fragmentOpts); err != nil {
 		f.Progress(fmt.Sprintf("Warning: could not write SSH config fragment: %v", err))
+	}
+
+	// REQ-007-004: Warn if SSH config doesn't include sd fragments
+	sshConfigPath := filepath.Join(sshDir, "config")
+	if sshConfigData, err := os.ReadFile(sshConfigPath); err == nil {
+		if ssh.NeedsInclude(sshConfigData) {
+			f.Progress("Warning: ~/.ssh/config does not include 'Include config.d/*'. SSH shortcuts for sd VMs will not work. Add this line to the top of ~/.ssh/config: Include config.d/*")
+		}
 	}
 }
 
