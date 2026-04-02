@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -100,10 +101,27 @@ func showSingleVMStatus(cmd *cobra.Command, b backend.Backend, name string, f *u
 		}
 	}
 
+	// REQ-006-009: Show provisioning state if available
+	var provisions []string
+	if l := Loader(); l != nil {
+		if vmCfg, err := l.ReadVMConfig(name); err == nil && len(vmCfg.Provisions) > 0 {
+			provisions = vmCfg.Provisions
+		}
+	}
+
 	// If we have full VMInfo, use it; otherwise build from Status result
 	if vmInfo != nil {
-		f.SuccessData(vmInfo, func() string {
-			return formatVMDetail(*vmInfo)
+		type vmInfoWithProvisions struct {
+			backend.VMInfo
+			Provisions []string `json:"provisions,omitempty"`
+		}
+		result := vmInfoWithProvisions{VMInfo: *vmInfo, Provisions: provisions}
+		f.SuccessData(result, func() string {
+			out := formatVMDetail(*vmInfo)
+			if len(provisions) > 0 {
+				out += fmt.Sprintf("Modules: %s\n", strings.Join(provisions, ", "))
+			}
+			return out
 		})
 	} else {
 		// Fallback: only have name and status

@@ -6,6 +6,8 @@ package cmd
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -71,6 +73,30 @@ func runList(cmd *cobra.Command, args []string) error {
 	// Ensure non-nil slice for JSON serialization ([] not null)
 	if vms == nil {
 		vms = []backend.VMInfo{}
+	}
+
+	// REQ-001-011: Detect orphaned VM state
+	if l := Loader(); l != nil {
+		sdHome := l.SDHome()
+		vmsDir := filepath.Join(sdHome, "vms")
+		if entries, err := os.ReadDir(vmsDir); err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				vmName := entry.Name()
+				found := false
+				for _, vm := range vms {
+					if vm.Name == vmName {
+						found = true
+						break
+					}
+				}
+				if !found {
+					f.Progress(fmt.Sprintf("Warning: orphaned VM state for %q in %s (no matching VM in backend)", vmName, vmsDir))
+				}
+			}
+		}
 	}
 
 	f.SuccessData(vms, func() string {
