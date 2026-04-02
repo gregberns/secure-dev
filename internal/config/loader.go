@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 // Loader provides access to the resolved configuration.
@@ -114,6 +115,11 @@ func (l *Loader) Load() error {
 
 	// Restore env var overrides so they take precedence over config files.
 	l.restoreEnvOverrides(envSnapshot)
+
+	// REQ-005-016: Verify SD_HOME directory permissions
+	if err := l.verifyPermissions(); err != nil {
+		l.warnings = append(l.warnings, err.Error())
+	}
 
 	l.loaded = true
 	return nil
@@ -348,13 +354,10 @@ func (l *Loader) Set(key string, value interface{}, target string) error {
 	// Set the value
 	v.Set(key, value)
 
-	// Write back
-	if err := v.WriteConfigAs(filePath); err != nil {
+	// REQ-005-016: Write with explicit 0600 permissions to prevent TOCTOU
+	if err := l.writeConfigSecure(v.AllSettings(), filePath); err != nil {
 		return fmt.Errorf("failed to write config to %s: %w", filePath, err)
 	}
-
-	// Set permissions
-	os.Chmod(filePath, 0600)
 
 	return nil
 }
@@ -548,5 +551,88 @@ func (l *Loader) loadProjectConfig(path string) error {
 		l.v.Set(key, v.Get(key))
 	}
 
+	return nil
+}
+
+// verifyPermissions checks that SD_HOME and its files have secure permissions.
+// REQ-005-016: SD_HOME must be 0700, config files must be 0600.
+func (l *Loader) verifyPermissions() error {
+	info, err := os.Stat(l.sdHome)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // SD_HOME doesn't exist yet
+		}
+		return fmt.Errorf("cannot check SD_HOME permissions: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("SD_HOME %s is not a directory", l.sdHome)
+	}
+	mode := info.Mode().Perm()
+	if mode != 0700 {
+		return fmt.Errorf("SD_HOME %s has permissions %04o, expected 0700; run: chmod 700 %s", l.sdHome, mode, l.sdHome)
+	}
+
+	configPath := filepath.Join(l.sdHome, "config.yaml")
+	if fi, err := os.Stat(configPath); err == nil {
+		if perm := fi.Mode().Perm(); perm&0077 != 0 {
+			return fmt.Errorf("config file %s has permissions %04o, expected 0600; run: chmod 600 %s", configPath, perm, configPath)
+		}
+	}
+
+	return nil
+}
+
+// writeConfigSecure writes configuration data to a file with explicit 0600
+// permissions, avoiding the TOCTOU race of WriteConfigAs + Chmod.
+// REQ-005-016
+func (l *Loader) writeConfigSecure(settings map[string]any, filePath string) error {
+	data, err := yaml.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	dir := filepath.Dir(filePath)
+	tmp, err := os.OpenFile(
+		filepath.Join(dir, ".config.yaml.tmp"),
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create temp config file: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to close temp config file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, filePath); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to rename config file: %w", err)
+	}
+	return nil
+}
+
+// EnsureSDHome creates the SD_HOME directory with correct permissions if it
+// does not exist. REQ-005-016
+func (l *Loader) EnsureSDHome() error {
+	info, err := os.Stat(l.sdHome)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("SD_HOME %s exists but is not a directory", l.sdHome)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("cannot check SD_HOME: %w", err)
+	}
+	if err := os.MkdirAll(l.sdHome, 0700); err != nil {
+		return fmt.Errorf("failed to create SD_HOME %s: %w", l.sdHome, err)
+	}
 	return nil
 }

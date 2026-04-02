@@ -74,6 +74,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Check VM backend availability
 	checks = append(checks, checkBackend())
 
+	// Check SD_HOME permissions (REQ-005-016)
+	checks = append(checks, checkSDHomePermissions())
+
 	// Check for cached git credentials (REQ-004-030)
 	checks = append(checks, checkGitCredentials())
 
@@ -176,6 +179,50 @@ func checkBackend() doctorCheck {
 		Name:    "backend",
 		Status:  "pass",
 		Message: fmt.Sprintf("backend %q available", backendName),
+	}
+}
+
+// checkSDHomePermissions verifies SD_HOME directory permissions.
+// REQ-005-016
+func checkSDHomePermissions() doctorCheck {
+	if Loader() == nil {
+		return doctorCheck{
+			Name:    "sd_home_permissions",
+			Status:  "pass",
+			Message: "no loader available",
+		}
+	}
+
+	sdHome := Loader().SDHome()
+	info, err := os.Stat(sdHome)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return doctorCheck{
+				Name:    "sd_home_permissions",
+				Status:  "pass",
+				Message: fmt.Sprintf("SD_HOME %s does not exist yet", sdHome),
+			}
+		}
+		return doctorCheck{
+			Name:    "sd_home_permissions",
+			Status:  "fail",
+			Message: fmt.Sprintf("cannot check SD_HOME: %v", err),
+		}
+	}
+
+	mode := info.Mode().Perm()
+	if mode != 0700 {
+		return doctorCheck{
+			Name:    "sd_home_permissions",
+			Status:  "fail",
+			Message: fmt.Sprintf("SD_HOME %s has permissions %04o, expected 0700; run: chmod 700 %s", sdHome, mode, sdHome),
+		}
+	}
+
+	return doctorCheck{
+		Name:    "sd_home_permissions",
+		Status:  "pass",
+		Message: fmt.Sprintf("SD_HOME %s has correct permissions (0700)", sdHome),
 	}
 }
 

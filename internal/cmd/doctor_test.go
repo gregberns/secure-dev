@@ -66,6 +66,8 @@ func (e *execError) Error() string {
 func setupDoctorTest(t *testing.T, paths mockDoctorPaths, backendAvail bool) {
 	t.Helper()
 	tmpDir := t.TempDir()
+	// REQ-005-016: SD_HOME must be 0700 for permission checks to pass
+	os.Chmod(tmpDir, 0700)
 	t.Setenv("SD_HOME", tmpDir)
 	t.Setenv("HOME", tmpDir)
 	resetRootFlags(t)
@@ -208,7 +210,7 @@ func TestDoctorCommand_JSONOutput_AllPass(t *testing.T) {
 
 	data, ok := result["data"].([]any)
 	require.True(t, ok, "data must be a JSON array")
-	assert.Len(t, data, 8, "should have 4 binary + 1 config + 1 backend + 1 git_credentials + 1 project_security_config checks")
+	assert.Len(t, data, 9, "should have 4 binary + 1 config + 1 backend + 1 sd_home_permissions + 1 git_credentials + 1 project_security_config checks")
 
 	for _, item := range data {
 		check := item.(map[string]any)
@@ -265,7 +267,7 @@ func TestDoctorCommand_JSONOutput_SomeFail(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 3, failCount, "limactl, tmux, and backend should fail")
-	assert.Equal(t, 5, passCount, "ssh, rsync, config, git_credentials, project_security_config checks pass")
+	assert.Equal(t, 6, passCount, "ssh, rsync, config, sd_home_permissions, git_credentials, project_security_config checks pass")
 }
 
 func TestDoctorCommand_NoConfigRequired(t *testing.T) {
@@ -412,7 +414,7 @@ func TestProperty_DoctorJSONAlwaysValid(t *testing.T) {
 
 			data, ok := result["data"].([]any)
 			require.True(t, ok, "data must be an array")
-			assert.Len(t, data, 8, "always 8 checks")
+			assert.Len(t, data, 9, "always 9 checks")
 
 			for _, item := range data {
 				check := item.(map[string]any)
