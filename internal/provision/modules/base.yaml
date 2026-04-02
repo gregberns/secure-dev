@@ -22,6 +22,24 @@ scripts:
         echo "WARNING: ~/.git-credentials found, removing" >&2
         rm -f ~/.git-credentials
       fi
+  - mode: user
+    script: |
+      # REQ-001-013: Guest VM environment setup
+      mkdir -p ~/.sd/bin ~/projects
+      grep -q '\.sd/bin' ~/.profile 2>/dev/null || \
+        echo 'export PATH="$HOME/.sd/bin:$PATH"' >> ~/.profile
+  - mode: user
+    script: |
+      # REQ-007-011: tmux default configuration
+      cat > ~/.tmux.conf << 'TMUXCONF'
+      set -g mouse on
+      set -g prefix C-a
+      unbind C-b
+      bind C-a send-prefix
+      set -g status-style 'bg=colour235 fg=colour248'
+      set -g status-right '#H'
+      setw -g mode-keys vi
+      TMUXCONF
 probe:
   command: "command -v git && command -v curl && command -v jq && command -v tmux"
   interval: 5s

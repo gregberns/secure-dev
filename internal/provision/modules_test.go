@@ -105,28 +105,86 @@ func TestLoadBuiltinModules_BaseHasGitCredentialPrevention(t *testing.T) {
 	// Must have a user-mode script for git credential prevention
 	found := false
 	for _, s := range base.Scripts {
-		if s.Mode == ModeUser {
+		if s.Mode == ModeUser && strings.Contains(s.Script, "credential.helper") {
 			assert.Contains(t, s.Script, "credential.helper",
 				"base user script must configure credential.helper (REQ-004-030)")
 			assert.Contains(t, s.Script, ".git-credentials",
 				"base user script must check for ~/.git-credentials (REQ-004-030)")
 			found = true
+			break
 		}
 	}
-	assert.True(t, found, "base module must have a user-mode script (REQ-004-030)")
+	assert.True(t, found, "base module must have a user-mode script for git credential prevention (REQ-004-030)")
 }
 
 func TestLoadBuiltinModules_BaseHasMultipleScripts(t *testing.T) {
-	// REQ-004-030: base module now has 2 scripts (system + user)
+	// REQ-004-030, REQ-001-013, REQ-007-011: base module has 4 scripts
 	modules, err := LoadBuiltinModules()
 	require.NoError(t, err)
 	base := modules[0]
 	assert.Equal(t, "base", base.Name)
-	assert.Len(t, base.Scripts, 2, "base module should have system and user scripts")
+	assert.Len(t, base.Scripts, 4, "base module should have 1 system + 3 user scripts")
 
-	// First is system (apt-get), second is user (git config)
+	// First is system (apt-get), remaining are user scripts
 	assert.Equal(t, ModeSystem, base.Scripts[0].Mode)
 	assert.Equal(t, ModeUser, base.Scripts[1].Mode)
+	assert.Equal(t, ModeUser, base.Scripts[2].Mode)
+	assert.Equal(t, ModeUser, base.Scripts[3].Mode)
+}
+
+func TestLoadBuiltinModules_BaseHasGuestEnvironmentSetup(t *testing.T) {
+	// REQ-001-013: Guest VM environment setup
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	base := modules[0]
+	assert.Equal(t, "base", base.Name)
+
+	found := false
+	for _, s := range base.Scripts {
+		if s.Mode == ModeUser && strings.Contains(s.Script, "REQ-001-013") {
+			// ~/.sd/bin is created
+			assert.Contains(t, s.Script, ".sd/bin",
+				"environment setup must create ~/.sd/bin (REQ-001-013)")
+			// ~/projects is created
+			assert.Contains(t, s.Script, "projects",
+				"environment setup must create ~/projects (REQ-001-013)")
+			// PATH is updated
+			assert.Contains(t, s.Script, "PATH",
+				"environment setup must add ~/.sd/bin to PATH (REQ-001-013)")
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "base module must have guest environment setup script (REQ-001-013)")
+}
+
+func TestLoadBuiltinModules_BaseHasTmuxConfig(t *testing.T) {
+	// REQ-007-011: tmux default configuration
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+	base := modules[0]
+	assert.Equal(t, "base", base.Name)
+
+	found := false
+	for _, s := range base.Scripts {
+		if s.Mode == ModeUser && strings.Contains(s.Script, "REQ-007-011") {
+			// Mouse support
+			assert.Contains(t, s.Script, "mouse on",
+				"tmux config must enable mouse support (REQ-007-011)")
+			// Ctrl-a prefix
+			assert.Contains(t, s.Script, "prefix C-a",
+				"tmux config must set C-a as prefix (REQ-007-011)")
+			// Vi keybindings
+			assert.Contains(t, s.Script, "mode-keys vi",
+				"tmux config must enable vi keybindings (REQ-007-011)")
+			// VM hostname in status bar
+			assert.Contains(t, s.Script, "status-right",
+				"tmux config must show hostname in status bar (REQ-007-011)")
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "base module must have tmux configuration script (REQ-007-011)")
 }
 
 func TestLoadBuiltinModules_ClaudeCodeInstallsNodeAndClaude(t *testing.T) {
