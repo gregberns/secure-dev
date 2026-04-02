@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
@@ -186,6 +187,15 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		CPUs    int    `json:"cpus"`
 		Memory  string `json:"memory"`
 		Disk    string `json:"disk"`
+	}
+
+	// REQ-004-022: Log VM lifecycle event
+	if al := AuditLog(); al != nil {
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now(),
+			EventType: "vm.create",
+			VMName:    name,
+		})
 	}
 
 	result := createResult{

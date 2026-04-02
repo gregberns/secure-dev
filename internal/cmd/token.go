@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -290,6 +291,15 @@ func runTokenRotate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-004-022: Log token lifecycle event
+	if al := AuditLog(); al != nil {
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now(),
+			EventType: "token.rotate",
+			VMName:    vmName,
+		})
+	}
+
 	// Emit warnings for security observations
 	for _, w := range warnings {
 		f.Warn(w.Message)
@@ -375,6 +385,15 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 			Code:    "token_revoke_failed",
 			Message: fmt.Sprintf("failed to write VM config: %v", err),
 		}
+	}
+
+	// REQ-004-022: Log token lifecycle event
+	if al := AuditLog(); al != nil {
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now(),
+			EventType: "token.revoke",
+			VMName:    vmName,
+		})
 	}
 
 	type revokeResult struct {

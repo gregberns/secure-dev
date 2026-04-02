@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/security"
 	"sd/internal/ssh"
 	"sd/internal/ui"
 )
@@ -146,6 +147,15 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	type destroyResult struct {
 		Name        string `json:"name"`
 		SnapshotTag string `json:"snapshot_tag,omitempty"` // REQ-004-019
+	}
+
+	// REQ-004-022: Log VM lifecycle event
+	if al := AuditLog(); al != nil {
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now(),
+			EventType: "vm.destroy",
+			VMName:    name,
+		})
 	}
 
 	result := destroyResult{Name: name, SnapshotTag: snapshotTag}

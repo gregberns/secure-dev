@@ -15,9 +15,11 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/security"
 	"sd/internal/ssh"
 	"sd/internal/ui"
 )
@@ -265,6 +267,15 @@ func runConnect(cmd *cobra.Command, args []string) error {
 				f.Progress(fmt.Sprintf("Injecting %d credential(s) via SSH SendEnv", len(creds)))
 			}
 		}
+	}
+
+	// REQ-004-022: Log VM lifecycle event
+	if al := AuditLog(); al != nil {
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now(),
+			EventType: "vm.connect",
+			VMName:    name,
+		})
 	}
 
 	// JSON output: report connection info and exit (interactive session can't produce JSON)

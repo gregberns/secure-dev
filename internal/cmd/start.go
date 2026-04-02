@@ -5,9 +5,11 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/security"
 	"sd/internal/ui"
 )
 
@@ -123,6 +125,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 	type startResult struct {
 		Name   string `json:"name"`
 		Status string `json:"status"`
+	}
+
+	// REQ-004-022: Log VM lifecycle event
+	if al := AuditLog(); al != nil {
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now(),
+			EventType: "vm.start",
+			VMName:    name,
+		})
 	}
 
 	result := startResult{Name: name, Status: string(backend.StatusRunning)}

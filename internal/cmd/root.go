@@ -8,10 +8,13 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"sd/internal/config"
+	"sd/internal/security"
 	"sd/internal/ui"
 )
 
@@ -80,11 +83,41 @@ credential injection, and session management.`,
 				// Non-fatal for commands that don't need config
 			}
 
+			// REQ-004-021: Initialize audit logger and record start time
+			cmdStartTime = time.Now()
+			sdHome := ""
+			if loader != nil {
+				sdHome = loader.SDHome()
+			}
+			if sdHome == "" {
+				home, _ := os.UserHomeDir()
+				sdHome = filepath.Join(home, ".sd")
+			}
+			auditLogger = security.NewAuditLogger(filepath.Join(sdHome, "audit.log"))
+
+			return nil
+		},
+		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+			if auditLogger == nil {
+				return nil
+			}
+			// REQ-004-021: Log every CLI command invocation
+			entry := security.CommandLogEntry{
+				Timestamp:  cmdStartTime,
+				Command:    cmd.CommandPath(),
+				Args:       args,
+				ExitCode:   0, // PostRunE only runs on success
+				DurationMs: time.Since(cmdStartTime).Milliseconds(),
+			}
+			// Best-effort: don't fail the command if audit logging fails
+			_ = auditLogger.LogCommand(entry)
 			return nil
 		},
 	}
-	loader    *config.Loader
-	formatter *ui.Formatter
+	loader       *config.Loader
+	formatter    *ui.Formatter
+	auditLogger  *security.AuditLogger // REQ-004-021: audit logger for command and event logging
+	cmdStartTime time.Time             // REQ-004-021: tracks command duration
 )
 
 func init() {
@@ -148,6 +181,12 @@ func Formatter() *ui.Formatter {
 // Loader returns the current config loader (set during PersistentPreRunE).
 func Loader() *config.Loader {
 	return loader
+}
+
+// AuditLog returns the current audit logger (set during PersistentPreRunE).
+// REQ-004-021
+func AuditLog() *security.AuditLogger {
+	return auditLogger
 }
 
 // resolveVMName determines the VM name from args, flags, or config.

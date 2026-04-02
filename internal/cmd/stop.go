@@ -5,9 +5,11 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/security"
 	"sd/internal/ui"
 )
 
@@ -93,6 +95,14 @@ func runStop(cmd *cobra.Command, args []string) error {
 
 	// REQ-003-003: Stop on already-stopped VM is a no-op (silent success)
 	if status == backend.StatusStopped {
+		// REQ-004-022: Log VM lifecycle event (already stopped)
+		if al := AuditLog(); al != nil {
+			_ = al.LogEvent(security.EventLogEntry{
+				Timestamp: time.Now(),
+				EventType: "vm.stop",
+				VMName:    name,
+			})
+		}
 		type stopResult struct {
 			Name   string `json:"name"`
 			Status string `json:"status"`
@@ -115,6 +125,15 @@ func runStop(cmd *cobra.Command, args []string) error {
 			Code:    "vm_stop_failed",
 			Message: fmt.Sprintf("failed to stop VM %q: %v", name, err),
 		}
+	}
+
+	// REQ-004-022: Log VM lifecycle event
+	if al := AuditLog(); al != nil {
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now(),
+			EventType: "vm.stop",
+			VMName:    name,
+		})
 	}
 
 	type stopResult struct {
