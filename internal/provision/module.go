@@ -6,6 +6,8 @@ package provision
 import (
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -292,5 +294,38 @@ func LoadBuiltinModules() ([]Module, error) {
 	}
 
 	return result, nil
+}
+
+// LoadUserModules reads custom provisioning modules from $SD_HOME/provisions/.
+// REQ-006-007: Custom module support from user directory.
+func LoadUserModules(sdHome string) ([]Module, error) {
+	userDir := filepath.Join(sdHome, "provisions")
+	entries, err := os.ReadDir(userDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read user modules dir: %w", err)
+	}
+
+	var userModules []Module
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(userDir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read user module %q: %w", entry.Name(), err)
+		}
+		m, err := ParseModule(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse user module %q: %w", entry.Name(), err)
+		}
+		if err := m.Validate(); err != nil {
+			return nil, fmt.Errorf("user module %q: %w", entry.Name(), err)
+		}
+		userModules = append(userModules, *m)
+	}
+	return userModules, nil
 }
 
