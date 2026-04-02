@@ -82,11 +82,37 @@ type AuditLogger struct {
 
 // NewAuditLogger creates a new audit logger that appends to the given file.
 // The file is created if it does not exist.
+// REQ-004-022: Recovers the hash chain tip from the last log line on restart.
 func NewAuditLogger(path string) *AuditLogger {
 	return &AuditLogger{
 		path:     path,
-		lastHash: GenesisHash,
+		lastHash: recoverLastHash(path),
 	}
+}
+
+// recoverLastHash reads the last non-empty line of an existing audit log file
+// and returns its SHA-256 hash. If the file doesn't exist, is empty, or can't
+// be read, it returns GenesisHash so the chain starts fresh.
+// REQ-004-022: Hash chain continuity across process restarts.
+func recoverLastHash(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return GenesisHash
+	}
+	defer f.Close()
+
+	var lastLine string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			lastLine = line
+		}
+	}
+	if lastLine == "" {
+		return GenesisHash
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(lastLine)))
 }
 
 // LogCommand records an sd CLI invocation.
