@@ -29,6 +29,28 @@ scripts:
       NVM_LINE='[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"'
       grep -q 'nvm.sh' ~/.profile 2>/dev/null || echo "$NVM_LINE" >> ~/.profile
       grep -q 'nvm.sh' ~/.bashrc 2>/dev/null || echo "$NVM_LINE" >> ~/.bashrc
+  - mode: user
+    script: |
+      # REQ-007-015: Create default CLAUDE.md for agent session guidance
+      mkdir -p ~/projects
+      if [ ! -f ~/projects/CLAUDE.md ]; then
+        cat > ~/projects/CLAUDE.md << 'CLAUDEMD'
+      # Agent Instructions
+
+      You are running inside an sd secure development VM.
+
+      ## Environment
+      - Working directory: ~/projects
+      - Tools: ~/.sd/bin is on PATH
+      - Git is configured (credential helper disabled for security)
+      - GitHub CLI (gh) is available if installed
+
+      ## Security Notes
+      - Credentials are injected via SSH environment variables
+      - Do NOT write credentials to disk
+      - Egress is restricted to allowlisted domains
+      CLAUDEMD
+      fi
 checksums:
   nvm-install.sh: "4b6a3b68a870ebd3f22993b1adee92c19eb059609a36e26be57d7a774dbe6e57"
 probe:

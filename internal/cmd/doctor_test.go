@@ -210,7 +210,7 @@ func TestDoctorCommand_JSONOutput_AllPass(t *testing.T) {
 
 	data, ok := result["data"].([]any)
 	require.True(t, ok, "data must be a JSON array")
-	assert.Len(t, data, 9, "should have 4 binary + 1 config + 1 backend + 1 sd_home_permissions + 1 git_credentials + 1 project_security_config checks")
+	assert.Len(t, data, 10, "should have 4 binary + 1 config + 1 backend + 1 sd_home_permissions + 1 git_credentials + 1 project_security_config + 1 ssh_fragment_security checks")
 
 	for _, item := range data {
 		check := item.(map[string]any)
@@ -267,7 +267,7 @@ func TestDoctorCommand_JSONOutput_SomeFail(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 3, failCount, "limactl, tmux, and backend should fail")
-	assert.Equal(t, 6, passCount, "ssh, rsync, config, sd_home_permissions, git_credentials, project_security_config checks pass")
+	assert.Equal(t, 7, passCount, "ssh, rsync, config, sd_home_permissions, git_credentials, project_security_config, ssh_fragment_security checks pass")
 }
 
 func TestDoctorCommand_NoConfigRequired(t *testing.T) {
@@ -414,7 +414,7 @@ func TestProperty_DoctorJSONAlwaysValid(t *testing.T) {
 
 			data, ok := result["data"].([]any)
 			require.True(t, ok, "data must be an array")
-			assert.Len(t, data, 9, "always 9 checks")
+			assert.Len(t, data, 10, "always 10 checks")
 
 			for _, item := range data {
 				check := item.(map[string]any)

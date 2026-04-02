@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -82,6 +83,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	// Check for security keys in project-level config (REQ-004-029)
 	checks = append(checks, checkProjectSecurityConfig())
+
+	// Check SSH fragment security (REQ-004-027)
+	checks = append(checks, checkSSHFragmentSecurity())
 
 	// Determine overall status
 	allPassed := true
@@ -342,6 +346,55 @@ func checkProjectSecurityConfig() doctorCheck {
 		Name:    "project_security_config",
 		Status:  "fail",
 		Message: fmt.Sprintf("project config contains security keys (%s) which are ignored; set these in ~/.sd/config.yaml or via CLI flags (REQ-004-029)", keyList),
+	}
+}
+
+// checkSSHFragmentSecurity checks SSH config fragments for security settings.
+// REQ-004-027
+func checkSSHFragmentSecurity() doctorCheck {
+	if Loader() == nil {
+		return doctorCheck{Name: "ssh_fragment_security", Status: "pass", Message: "no loader available"}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return doctorCheck{Name: "ssh_fragment_security", Status: "pass", Message: "cannot determine home directory"}
+	}
+
+	configDir := filepath.Join(home, ".ssh", "config.d")
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		return doctorCheck{Name: "ssh_fragment_security", Status: "pass", Message: "no SSH config fragments found"}
+	}
+
+	var issues []string
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "sd-") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(configDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		if !strings.Contains(content, "ForwardAgent no") {
+			issues = append(issues, fmt.Sprintf("%s: missing ForwardAgent no", entry.Name()))
+		}
+		if !strings.Contains(content, "ForwardX11 no") {
+			issues = append(issues, fmt.Sprintf("%s: missing ForwardX11 no", entry.Name()))
+		}
+	}
+
+	if len(issues) > 0 {
+		return doctorCheck{
+			Name:    "ssh_fragment_security",
+			Status:  "fail",
+			Message: fmt.Sprintf("SSH fragment security issues: %s", strings.Join(issues, "; ")),
+		}
+	}
+	return doctorCheck{
+		Name:    "ssh_fragment_security",
+		Status:  "pass",
+		Message: "SSH fragments have correct security settings",
 	}
 }
 
