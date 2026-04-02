@@ -618,6 +618,68 @@ func (l *Loader) writeConfigSecure(settings map[string]any, filePath string) err
 	return nil
 }
 
+// WriteVMConfig persists a VM configuration to $SD_HOME/vms/<name>/config.yaml.
+// REQ-005-007: VM configuration file format.
+func (l *Loader) WriteVMConfig(cfg *VMConfig) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if cfg.Name == "" {
+		return fmt.Errorf("VM config name must not be empty")
+	}
+
+	dir := filepath.Join(l.sdHome, "vms", cfg.Name)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create VM config directory: %w", err)
+	}
+
+	filePath := filepath.Join(dir, "config.yaml")
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal VM config: %w", err)
+	}
+
+	// REQ-005-016: Write with explicit 0600 mode via atomic temp+rename
+	tmpPath := filePath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("create temp VM config: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write VM config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close VM config: %w", err)
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename VM config: %w", err)
+	}
+	return nil
+}
+
+// ReadVMConfig reads a VM configuration from $SD_HOME/vms/<name>/config.yaml.
+// REQ-005-007
+func (l *Loader) ReadVMConfig(name string) (*VMConfig, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	filePath := filepath.Join(l.sdHome, "vms", name, "config.yaml")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read VM config: %w", err)
+	}
+
+	var cfg VMConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse VM config: %w", err)
+	}
+	return &cfg, nil
+}
+
 // EnsureSDHome creates the SD_HOME directory with correct permissions if it
 // does not exist. REQ-005-016
 func (l *Loader) EnsureSDHome() error {

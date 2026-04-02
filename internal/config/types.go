@@ -56,16 +56,16 @@ type VMDef struct {
 // including runtime state managed by sd.
 // REQ-005-007
 type VMConfig struct {
-	Name        string         `yaml:"name"`
-	Backend     string         `yaml:"backend"`
-	CPUs        int            `yaml:"cpus"`
-	Memory      string         `yaml:"memory"`
-	Disk        string         `yaml:"disk"`
-	Image       string         `yaml:"image"`
-	Provisions  []string       `yaml:"provisions"`
-	Env         map[string]string `yaml:"env"`
-	State       VMState        `yaml:"state"`
-	BackendMeta map[string]any `yaml:"backend_meta"`
+	Name        string            `yaml:"name"                   json:"name"`
+	Backend     string            `yaml:"backend"                json:"backend"`
+	CPUs        int               `yaml:"cpus"                   json:"cpus"`
+	Memory      string            `yaml:"memory"                 json:"memory"`
+	Disk        string            `yaml:"disk"                   json:"disk"`
+	Image       string            `yaml:"image"                  json:"image"`
+	Provisions  []string          `yaml:"provisions,omitempty"   json:"provisions,omitempty"`
+	Env         map[string]string `yaml:"env,omitempty"          json:"env,omitempty"`
+	State       VMState           `yaml:"state"                  json:"state"`
+	BackendMeta map[string]any    `yaml:"backend_meta,omitempty" json:"backend_meta,omitempty"`
 }
 
 // VMState tracks the runtime state of a VM instance.
