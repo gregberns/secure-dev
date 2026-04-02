@@ -3,7 +3,9 @@ package provision
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -267,4 +269,124 @@ func TestProvision_MultipleScriptsGetSameChecksums(t *testing.T) {
 		assert.Contains(t, script, "export CHECKSUM_TOOL_TAR_GZ=",
 			"script[%d] should contain checksum export", i)
 	}
+}
+
+// --- Readiness Probe Tests ---
+// REQ-006-008: Readiness probes.
+
+func TestProvision_ProbePassesFirstTry(t *testing.T) {
+	var probeCalls int32
+	execFn := func(ctx context.Context, name string, command []string) (string, string, int, error) {
+		// Detect probe vs script: probe uses "bash -c <command>" without sudo prefix
+		// and the command matches the probe command.
+		if len(command) == 3 && command[0] == "bash" && command[1] == "-c" && command[2] == "test -f /ready" {
+			atomic.AddInt32(&probeCalls, 1)
+		}
+		return "", "", 0, nil
+	}
+
+	modules := []Module{
+		{
+			Name:        "test-mod",
+			Description: "Module with probe",
+			Scripts:     []Script{{Mode: ModeUser, Script: "echo setup\n"}},
+			Probe: &Probe{
+				Command:  "test -f /ready",
+				Interval: 10 * time.Millisecond,
+				Timeout:  1 * time.Second,
+			},
+		},
+	}
+
+	result := Provision(context.Background(), execFn, "test-vm", modules)
+	require.False(t, result.Failed, "expected success but got: %s", result.Error)
+	assert.Equal(t, StatusCompleted, result.State.Modules[0].Status)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&probeCalls), "probe should run exactly once")
+}
+
+func TestProvision_ProbePassesAfterRetries(t *testing.T) {
+	var probeCalls int32
+	execFn := func(ctx context.Context, name string, command []string) (string, string, int, error) {
+		if len(command) == 3 && command[0] == "bash" && command[1] == "-c" && command[2] == "check-ready" {
+			n := atomic.AddInt32(&probeCalls, 1)
+			if n < 3 {
+				return "", "not ready", 1, nil // fail first 2 attempts
+			}
+			return "", "", 0, nil // pass on 3rd attempt
+		}
+		return "", "", 0, nil // scripts succeed
+	}
+
+	modules := []Module{
+		{
+			Name:        "test-mod",
+			Description: "Module with retrying probe",
+			Scripts:     []Script{{Mode: ModeUser, Script: "echo setup\n"}},
+			Probe: &Probe{
+				Command:  "check-ready",
+				Interval: 10 * time.Millisecond,
+				Timeout:  2 * time.Second,
+			},
+		},
+	}
+
+	result := Provision(context.Background(), execFn, "test-vm", modules)
+	require.False(t, result.Failed, "expected success after retries but got: %s", result.Error)
+	assert.Equal(t, StatusCompleted, result.State.Modules[0].Status)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&probeCalls), "probe should have been called 3 times")
+}
+
+func TestProvision_ProbeTimesOut(t *testing.T) {
+	execFn := func(ctx context.Context, name string, command []string) (string, string, int, error) {
+		if len(command) == 3 && command[0] == "bash" && command[1] == "-c" && command[2] == "false" {
+			return "", "fail", 1, nil // always fail
+		}
+		return "", "", 0, nil // scripts succeed
+	}
+
+	modules := []Module{
+		{
+			Name:        "test-mod",
+			Description: "Module with failing probe",
+			Scripts:     []Script{{Mode: ModeUser, Script: "echo setup\n"}},
+			Probe: &Probe{
+				Command:  "false",
+				Interval: 10 * time.Millisecond,
+				Timeout:  50 * time.Millisecond,
+			},
+		},
+	}
+
+	result := Provision(context.Background(), execFn, "test-vm", modules)
+	require.True(t, result.Failed)
+	assert.Equal(t, "test-mod", result.Module)
+	assert.Contains(t, result.Error, "probe timed out")
+	assert.Contains(t, result.Error, "test-mod")
+	assert.Equal(t, StatusFailed, result.State.Modules[0].Status)
+	assert.Equal(t, 1, result.Script, "script index should be len(scripts) for probe failure")
+}
+
+func TestProvision_NoProbe_SkipsProbeExecution(t *testing.T) {
+	callCount := 0
+	execFn := func(ctx context.Context, name string, command []string) (string, string, int, error) {
+		callCount++
+		return "", "", 0, nil
+	}
+
+	modules := []Module{
+		{
+			Name:        "test-mod",
+			Description: "Module without probe",
+			Scripts: []Script{
+				{Mode: ModeUser, Script: "echo hello\n"},
+				{Mode: ModeSystem, Script: "echo world\n"},
+			},
+		},
+	}
+
+	result := Provision(context.Background(), execFn, "test-vm", modules)
+	require.False(t, result.Failed)
+	assert.Equal(t, StatusCompleted, result.State.Modules[0].Status)
+	// Should only have the 2 script calls, no probe calls
+	assert.Equal(t, 2, callCount, "should only execute scripts, not a probe")
 }

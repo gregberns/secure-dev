@@ -89,6 +89,26 @@ func Provision(ctx context.Context, execFn ExecFunc, vmName string, modules []Mo
 			}
 		}
 
+		// REQ-006-008: Execute readiness probe if defined
+		if mod.Probe != nil {
+			mod.ApplyProbeDefaults()
+			if err := runProbe(ctx, execFn, vmName, mod); err != nil {
+				endTime := time.Now()
+				state.Modules[i].EndedAt = &endTime
+				state.Modules[i].Status = StatusFailed
+				state.Modules[i].Error = err.Error()
+				finishTime := time.Now()
+				state.Finished = &finishTime
+				return ProvisionResult{
+					State:  state,
+					Failed: true,
+					Module: mod.Name,
+					Script: len(mod.Scripts), // probe is after all scripts
+					Error:  err.Error(),
+				}
+			}
+		}
+
 		endTime := time.Now()
 		state.Modules[i].EndedAt = &endTime
 		state.Modules[i].Status = StatusCompleted
@@ -99,6 +119,31 @@ func Provision(ctx context.Context, execFn ExecFunc, vmName string, modules []Mo
 	return ProvisionResult{
 		State:  state,
 		Failed: false,
+	}
+}
+
+// runProbe executes a module's readiness probe with retries.
+// REQ-006-008: Readiness probes with interval and timeout.
+func runProbe(ctx context.Context, execFn ExecFunc, vmName string, mod *Module) error {
+	deadline := time.Now().Add(mod.Probe.Timeout)
+	cmd := []string{"bash", "-c", mod.Probe.Command}
+
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("probe timed out for module %q after %s", mod.Name, mod.Probe.Timeout)
+		}
+
+		_, _, exitCode, err := execFn(ctx, vmName, cmd)
+		if err == nil && exitCode == 0 {
+			return nil // probe passed
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(mod.Probe.Interval):
+			// retry
+		}
 	}
 }
 
