@@ -173,7 +173,7 @@ func TestCompletionCommand_ValidArgs(t *testing.T) {
 	assert.Len(t, validArgs, 3)
 }
 
-func TestCompletionCommand_DisableFlagParsing(t *testing.T) {
+func TestCompletionCommand_FlagParsingEnabled(t *testing.T) {
 	newRootTestEnv(t)
 
 	root := RootCmd()
@@ -181,9 +181,9 @@ func TestCompletionCommand_DisableFlagParsing(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, completionCmd)
 
-	// Completion should not pass --json etc. to the completion generator
-	assert.True(t, completionCmd.DisableFlagParsing,
-		"completion should disable flag parsing to avoid interference with shell scripts")
+	// Flag parsing must be enabled so --help works correctly
+	assert.False(t, completionCmd.DisableFlagParsing,
+		"completion must allow flag parsing so --help is handled by Cobra")
 }
 
 // --- VM Name Completion Tests ---
