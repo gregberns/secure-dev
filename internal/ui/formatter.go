@@ -96,6 +96,18 @@ func (f *Formatter) SuccessData(data any, formatFunc func() string) {
 	}
 }
 
+// FailureData outputs structured data with ok:false in JSON mode.
+// Used when a command fails but still has meaningful data to return (e.g. doctor check results).
+func (f *Formatter) FailureData(data any, formatFunc func() string) {
+	if f.jsonMode {
+		enc := json.NewEncoder(f.stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(jsonSuccess{OK: false, Data: data})
+	} else if formatFunc != nil {
+		fmt.Fprint(f.stdout, formatFunc())
+	}
+}
+
 // Error outputs an error.
 // In JSON mode, writes {"ok": false, "error": {...}} to stdout.
 // In human mode, writes "Error: <message>" to stderr.

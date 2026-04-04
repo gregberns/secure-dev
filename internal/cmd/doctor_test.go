@@ -244,14 +244,17 @@ func TestDoctorCommand_JSONOutput_SomeFail(t *testing.T) {
 	buf.ReadFrom(r)
 	output := buf.String()
 
-	// JSON mode should succeed (no CLIError)
-	require.NoError(t, err)
+	// REQ-002-007: JSON mode must return error when checks fail
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "error must be CLIError")
+	assert.Equal(t, "doctor_check_failed", cliErr.Code)
 
 	var result map[string]any
 	err = json.Unmarshal([]byte(output), &result)
 	require.NoError(t, err)
 
-	assert.True(t, result["ok"].(bool), "JSON envelope ok should be true (data is the checks)")
+	assert.False(t, result["ok"].(bool), "JSON envelope ok must be false when checks fail")
 
 	data := result["data"].([]any)
 
@@ -882,10 +885,13 @@ func TestDoctorCommand_GitCredentialsFailInJSON(t *testing.T) {
 
 	root := RootCmd()
 	root.SetArgs([]string{"--json", "doctor"})
-	root.Execute()
+	execErr := root.Execute()
 
 	w.Close()
 	os.Stdout = oldStdout
+
+	// REQ-002-007: JSON mode must return error when checks fail
+	require.Error(t, execErr)
 
 	var buf bytes.Buffer
 	buf.ReadFrom(r)
@@ -893,6 +899,8 @@ func TestDoctorCommand_GitCredentialsFailInJSON(t *testing.T) {
 	var result map[string]any
 	err = json.Unmarshal(buf.Bytes(), &result)
 	require.NoError(t, err)
+
+	assert.False(t, result["ok"].(bool), "JSON envelope ok must be false when git_credentials fails")
 
 	data := result["data"].([]any)
 	found := false

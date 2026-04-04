@@ -96,19 +96,19 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	f.SuccessData(checks, func() string {
-		return formatDoctorOutput(checks)
-	})
+	humanFormat := func() string { return formatDoctorOutput(checks) }
 
-	if !allPassed && !f.JSONMode() {
-		// In human mode, exit non-zero if any check failed
-		return ui.CLIError{
-			Code:    "doctor_check_failed",
-			Message: "one or more checks failed",
-		}
+	if allPassed {
+		f.SuccessData(checks, humanFormat)
+		return nil
 	}
 
-	return nil
+	// REQ-002-007: When checks fail, JSON gets ok:false and both modes return error
+	f.FailureData(checks, humanFormat)
+	return ui.CLIError{
+		Code:    "doctor_check_failed",
+		Message: "one or more checks failed",
+	}
 }
 
 // checkBinary checks if a required binary is available in PATH.
