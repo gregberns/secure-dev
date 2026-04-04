@@ -37,7 +37,7 @@ based on the source path basename.`,
 
 If <guest-path> is omitted, files are copied to ~/<basename of host-path>
 inside the VM. Symlinks, permissions, and timestamps are preserved.`,
-		Args: cobra.RangeArgs(2, 3),
+		Args: rangeArgs(2, 3, "<vm> <host-path> [<guest-path>]"),
 		RunE: runSyncTo,
 	}
 	syncToCmd.Flags().Bool("watch", false, "Watch for changes and sync continuously (host-to-VM only)")
@@ -49,7 +49,7 @@ inside the VM. Symlinks, permissions, and timestamps are preserved.`,
 
 If <host-path> is omitted, files are copied to ./<basename of guest-path>
 on the host.`,
-		Args: cobra.RangeArgs(2, 3),
+		Args: rangeArgs(2, 3, "<vm> <guest-path> [<host-path>]"),
 		RunE: runSyncFrom,
 	}
 	syncFromCmd.Flags().Bool("diff", false, "Preview differences without copying")

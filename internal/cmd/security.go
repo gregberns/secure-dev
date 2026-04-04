@@ -34,7 +34,7 @@ Subcommands:
 mount status, egress rules, configured credentials, snapshot count,
 and the last audit event. Deviations from recommended posture are
 flagged as warnings.`,
-		Args: cobra.ExactArgs(1),
+		Args: exactArgs(1, "<name>"),
 		RunE: runSecurityStatus,
 	}
 

@@ -129,7 +129,7 @@ Subcommands:
 		Use:   "add <vm> <domain>",
 		Short: "Add a domain to VM egress allowlist",
 		Long:  `Add a domain to the VM's egress allowlist. The domain is merged with the default allowlist.`,
-		Args:  cobra.ExactArgs(2),
+		Args:  exactArgs(2, "<vm> <domain>"),
 		RunE:  runConfigEgressAdd,
 	}
 
@@ -138,7 +138,7 @@ Subcommands:
 		Use:   "remove <vm> <domain>",
 		Short: "Remove a domain from VM egress allowlist",
 		Long:  `Remove a domain from the VM's egress allowlist. Default domains cannot be removed.`,
-		Args:  cobra.ExactArgs(2),
+		Args:  exactArgs(2, "<vm> <domain>"),
 		RunE:  runConfigEgressRemove,
 	}
 
@@ -147,7 +147,7 @@ Subcommands:
 		Use:   "list <vm>",
 		Short: "List effective egress allowlist for a VM",
 		Long:  `List all allowed outbound destinations for a VM, distinguishing default from user-added domains.`,
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1, "<vm>"),
 		RunE:  runConfigEgressList,
 	}
 

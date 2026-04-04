@@ -85,7 +85,7 @@ Examples:
   sd connect myvm --new-window  # New window in existing session
   sd connect myvm --forward 8080:8080  # With port forwarding`,
 		GroupID: "connection",
-		Args:    cobra.ExactArgs(1),
+		Args:    exactArgs(1, "<vm-name> [flags]"),
 		RunE:    runConnect,
 	}
 

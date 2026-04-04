@@ -106,7 +106,7 @@ variables on the host.
 
 Reads GITHUB_TOKEN and ANTHROPIC_API_KEY from the host environment.
 Only variables that are set will be updated; others remain unchanged.`,
-		Args: cobra.ExactArgs(1),
+		Args: exactArgs(1, "<vm>"),
 		RunE: runTokenRotate,
 	}
 
@@ -116,7 +116,7 @@ Only variables that are set will be updated; others remain unchanged.`,
 		Short: "Revoke all stored credentials for a VM",
 		Long: `Remove all stored credentials for a VM. After revocation,
 sd connect will not inject any credentials into the session.`,
-		Args: cobra.ExactArgs(1),
+		Args: exactArgs(1, "<vm>"),
 		RunE: runTokenRevoke,
 	}
 
@@ -126,7 +126,7 @@ sd connect will not inject any credentials into the session.`,
 		Short: "List configured credential types for a VM",
 		Long: `Show which credential types are configured for a VM without
 revealing values. Use --json for structured output.`,
-		Args: cobra.ExactArgs(1),
+		Args: exactArgs(1, "<vm>"),
 		RunE: runTokenList,
 	}
 

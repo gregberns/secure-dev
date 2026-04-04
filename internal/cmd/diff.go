@@ -28,7 +28,7 @@ The following paths are flagged as security-sensitive:
   .circleci/*
   .git/hooks/*`,
 		GroupID: "security",
-		Args:    cobra.ExactArgs(1),
+		Args:    exactArgs(1, "<name>"),
 		RunE:    runDiff,
 	}
 

@@ -37,7 +37,7 @@ Requires --force (-f) flag for non-interactive use.
 A safety snapshot is automatically created before destruction (REQ-004-019).
 Use --no-snapshot to skip the safety snapshot.`,
 		GroupID: "vm",
-		Args:    cobra.ExactArgs(1),
+		Args:    exactArgs(1, "<name> [flags]"),
 		RunE:    runDestroy,
 	}
 

@@ -29,7 +29,7 @@ Examples:
   sd exec myvm -- echo hello
   sd exec --json myvm -- ls -la /tmp`,
 		GroupID: "connection",
-		Args:    cobra.MinimumNArgs(2),
+		Args:    minArgs(2, "<vm-name> -- <command> [args...]"),
 		RunE:    runExec,
 	}
 

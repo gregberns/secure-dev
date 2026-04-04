@@ -24,7 +24,7 @@ Examples:
   sd ssh-config myvm              # Print SSH config fragment
   sd ssh-config myvm --json       # Output config as JSON`,
 		GroupID: "connection",
-		Args:    cobra.ExactArgs(1),
+		Args:    exactArgs(1, "<vm-name>"),
 		RunE:    runSSHConfig,
 	}
 

@@ -38,10 +38,9 @@ Fish:
   # or save to completions directory:
   sd completion fish > ~/.config/fish/completions/sd.fish`,
 		GroupID:          "utility",
-		Args:             cobra.ExactArgs(1),
+		Args:             exactArgs(1, "<shell>"),
 		ValidArgs:        []string{"bash", "zsh", "fish"},
 		RunE:             runCompletion,
-		DisableFlagParsing: true,
 	}
 
 	rootCmd.AddCommand(completionCmd)

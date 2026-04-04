@@ -97,7 +97,7 @@ Subcommands:
 		Use:   "get <key>",
 		Short: "Get a config value",
 		Long:  `Display the resolved value for a configuration key along with its source.`,
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1, "<key>"),
 		RunE:  runConfigGet,
 	}
 
@@ -106,7 +106,7 @@ Subcommands:
 		Use:   "set <key> <value>",
 		Short: "Set a config value",
 		Long:  `Write a key-value pair to the user-level config file. Use --project to write to project-level config.`,
-		Args:  cobra.ExactArgs(2),
+		Args:  exactArgs(2, "<key> <value>"),
 		RunE:  runConfigSet,
 	}
 	configSetCmd.Flags().Bool("project", false, "write to project-level config instead of user-level")

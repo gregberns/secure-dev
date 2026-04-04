@@ -22,7 +22,7 @@ func init() {
 
 If the VM is already stopped, this command succeeds silently.`,
 		GroupID: "vm",
-		Args:    cobra.ExactArgs(1),
+		Args:    exactArgs(1, "<name>"),
 		RunE:    runStop,
 	}
 

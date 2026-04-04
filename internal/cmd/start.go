@@ -22,7 +22,7 @@ func init() {
 
 If the VM is already running, this is a no-op (silent success).`,
 		GroupID: "vm",
-		Args:    cobra.ExactArgs(1),
+		Args:    exactArgs(1, "<name>"),
 		RunE:    runStart,
 	}
 

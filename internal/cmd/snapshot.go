@@ -35,7 +35,7 @@ Subcommands:
 		Use:   "create <vm> --tag <tag>",
 		Short: "Create a named snapshot",
 		Long:  `Create a snapshot of the VM's current state with the given tag name.`,
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1, "<vm> --tag <tag>"),
 		RunE:  runSnapshotCreate,
 	}
 	snapshotCreateCmd.Flags().String("tag", "", "snapshot tag name (required)")
@@ -46,7 +46,7 @@ Subcommands:
 		Use:   "list <vm>",
 		Short: "List snapshots for a VM",
 		Long:  `List all snapshots for the given VM, showing tag name, creation time, and size.`,
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1, "<vm>"),
 		RunE:  runSnapshotList,
 	}
 
@@ -55,7 +55,7 @@ Subcommands:
 		Use:   "restore <vm> --tag <tag>",
 		Short: "Restore a VM to a snapshot",
 		Long:  `Restore the VM to the state captured by the named snapshot.`,
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1, "<vm> --tag <tag>"),
 		RunE:  runSnapshotRestore,
 	}
 	snapshotRestoreCmd.Flags().String("tag", "", "snapshot tag name (required)")
@@ -66,7 +66,7 @@ Subcommands:
 		Use:   "delete <vm> --tag <tag>",
 		Short: "Delete a snapshot",
 		Long:  `Delete the named snapshot from the VM.`,
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1, "<vm> --tag <tag>"),
 		RunE:  runSnapshotDelete,
 	}
 	snapshotDeleteCmd.Flags().String("tag", "", "snapshot tag name (required)")
