@@ -18,10 +18,13 @@ This file governs how all coding agents operate in this repository. CLAUDE.md is
 ```
 AGENTS.md              # This file (CLAUDE.md symlinks here)
 CLAUDE.md              # Symlink -> AGENTS.md
+.claude/skills/        # Claude Code skills (slash commands)
+  dev-workflow/        # /dev-workflow — spec-driven development lifecycle
 docs/                  # Research documents, guides, references
 specs/                 # Specifications (source of truth for all features)
   SPEC_FORMAT.md       # Meta-spec: how specs are written
   NNN-name.md          # Individual specs (numbered, kebab-case)
+plans/                 # Implementation plans (plans/{yyyy}-{mm}-{name}/)
 cmd/sd/                # CLI entry point and Cobra commands
 internal/              # All internal packages
   backend/             # VM backend interface and implementations
@@ -35,24 +38,58 @@ go.mod
 go.sum
 ```
 
-## Spec Workflow
+## Development Lifecycle
 
-### Writing Specs
+All significant changes MUST follow this pipeline. Use `/dev-workflow` to execute it.
+
+```
+Spec -> Spec Review (3 agents) -> Plan -> Plan Review (3 agents) -> Tasks -> Task Review -> Implement
+```
+
+### Phase Summary
+
+| Phase | Artifact | Gate |
+|-------|----------|------|
+| 1. Spec | `specs/NNN-name.md` | All required sections, status=review |
+| 2. Spec Review | 3 agents: architect, critic, qa | All must-fix issues resolved, status=approved |
+| 3. Plan | `plans/{yyyy}-{mm}-{name}/PLAN.md` | All reqs traced to tasks, testing plan complete |
+| 4. Plan Review | 3 agents: architect, critic, qa | All must-fix issues resolved, status=approved |
+| 5. Tasks | Beads created via `bd create` | One bead per plan task, all have acceptance criteria |
+| 6. Task Review | 1 agent verifies completeness | All beads match plan and spec |
+| 7. Implement | Code + tests | Each task includes property-based, unit, and integration tests |
+
+### Testing Requirements
+
+Every implementation task MUST include tests:
+- **Property-based tests** using `pgregory.net/rapid` for invariants
+- **Unit tests** with table-driven patterns and `testify`
+- **Integration tests** for cross-component scenarios
+
+### Spec Workflow
+
+#### Writing Specs
 
 1. Read `specs/SPEC_FORMAT.md` for the required structure.
 2. Number specs sequentially: `001-architecture.md`, `002-cli.md`, etc.
 3. Every spec MUST have: Status, Overview, Requirements (with IDs), Interface definitions (where applicable), Error handling, and Testing strategy.
 4. Requirements use the format `REQ-NNN-MMM` where NNN is the spec number and MMM is the requirement number within that spec.
 
-### Reviewing Specs
+#### Reviewing Specs
 
 Before any spec is considered ready for implementation:
-1. At least two independent review agents must review the spec.
+1. Three independent review agents must review the spec (architect, critic, qa).
 2. Reviews check for: completeness, internal consistency, cross-spec consistency, implementability, security implications, and testability.
 3. All review findings must be resolved in the spec before implementation begins.
 4. Review comments and resolutions are tracked in the spec's revision history section.
 
-### Implementing From Specs
+#### Plans
+
+1. Plans live in `plans/{yyyy}-{mm}-{plan-name}/PLAN.md`.
+2. Every spec requirement MUST map to at least one plan task.
+3. Every task MUST define its testing component.
+4. Plans are reviewed by 3 agents before task creation.
+
+#### Implementing From Specs
 
 1. Read the spec fully before writing any code.
 2. Reference requirement IDs in code comments where a requirement is fulfilled: `// REQ-002-003: support --json on all commands`
