@@ -2,6 +2,8 @@
 // REQ-007-015: Sync To VM
 // REQ-007-016: Sync From VM
 // REQ-007-017: Sync Diff Preview
+//
+// NOTE: Tests use global getBackendFunc — do not use t.Parallel().
 package cmd
 
 import (
@@ -15,25 +17,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/backend/memory"
 	"sd/internal/ui"
 )
 
-// --- Digital twin mock backends ---
+// ---------------------------------------------------------------------------
+// Thin Syncer wrapper
+// ---------------------------------------------------------------------------
 
-// mockSyncBackend is a digital twin of a backend for sync command testing.
-// It implements backend.Backend + backend.Syncer with configurable behavior.
-type mockSyncBackend struct {
-	name      string
-	available bool
-	statusMap map[string]backend.VMStatus
-	statusErr error
+// testSyncerBackend embeds *memory.Backend and adds Syncer interface for testing.
+// It delegates all Backend methods to the memory backend and only adds the
+// missing Syncer interface. This is NOT a full ad-hoc mock — it is the
+// approved approach from the plan for interfaces the memory backend does not
+// implement.
+type testSyncerBackend struct {
+	*memory.Backend
 
-	// Records calls
 	syncToCalls   []syncCall
 	syncFromCalls []syncCall
 	syncDiffCalls []syncCall
 
-	// Configurable results
 	syncToErr   error
 	syncFromErr error
 	syncDiffRes string
@@ -41,104 +44,51 @@ type mockSyncBackend struct {
 }
 
 type syncCall struct {
-	VMName   string
-	HostPath string
+	VMName    string
+	HostPath  string
 	GuestPath string
 }
 
-func (m *mockSyncBackend) Name() string { return m.name }
-func (m *mockSyncBackend) Available() error {
-	if m.available {
-		return nil
+func (s *testSyncerBackend) SyncTo(_ context.Context, name, hostPath, guestPath string) error {
+	if s.syncToErr != nil {
+		return s.syncToErr
 	}
-	return fmt.Errorf("backend not available")
-}
-func (m *mockSyncBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
+	s.syncToCalls = append(s.syncToCalls, syncCall{VMName: name, HostPath: hostPath, GuestPath: guestPath})
 	return nil
-}
-func (m *mockSyncBackend) Start(_ context.Context, _ string) error    { return nil }
-func (m *mockSyncBackend) Stop(_ context.Context, _ string) error     { return nil }
-func (m *mockSyncBackend) Destroy(_ context.Context, _ string) error  { return nil }
-func (m *mockSyncBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (m *mockSyncBackend) List(_ context.Context) ([]backend.VMInfo, error) {
-	return nil, nil
-}
-func (m *mockSyncBackend) Exec(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
-	return backend.ExecResult{}, nil
-}
-func (m *mockSyncBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
-	if m.statusErr != nil {
-		return "", m.statusErr
-	}
-	if s, ok := m.statusMap[name]; ok {
-		return s, nil
-	}
-	return "", backend.ErrVMNotFound
-}
-func (m *mockSyncBackend) SyncTo(_ context.Context, name, hostPath, guestPath string) error {
-	if m.syncToErr != nil {
-		return m.syncToErr
-	}
-	m.syncToCalls = append(m.syncToCalls, syncCall{VMName: name, HostPath: hostPath, GuestPath: guestPath})
-	return nil
-}
-func (m *mockSyncBackend) SyncFrom(_ context.Context, name, guestPath, hostPath string) error {
-	if m.syncFromErr != nil {
-		return m.syncFromErr
-	}
-	m.syncFromCalls = append(m.syncFromCalls, syncCall{VMName: name, HostPath: hostPath, GuestPath: guestPath})
-	return nil
-}
-func (m *mockSyncBackend) SyncDiff(_ context.Context, name, guestPath, hostPath string) (string, error) {
-	if m.syncDiffErr != nil {
-		return "", m.syncDiffErr
-	}
-	m.syncDiffCalls = append(m.syncDiffCalls, syncCall{VMName: name, HostPath: hostPath, GuestPath: guestPath})
-	return m.syncDiffRes, nil
 }
 
-// mockNoSyncerBackend is a backend that does NOT implement Syncer.
-type mockNoSyncerBackend struct {
-	name      string
-	available bool
-	statusMap map[string]backend.VMStatus
-}
-
-func (m *mockNoSyncerBackend) Name() string { return m.name }
-func (m *mockNoSyncerBackend) Available() error {
-	if m.available {
-		return nil
+func (s *testSyncerBackend) SyncFrom(_ context.Context, name, guestPath, hostPath string) error {
+	if s.syncFromErr != nil {
+		return s.syncFromErr
 	}
-	return fmt.Errorf("backend not available")
-}
-func (m *mockNoSyncerBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
+	s.syncFromCalls = append(s.syncFromCalls, syncCall{VMName: name, HostPath: hostPath, GuestPath: guestPath})
 	return nil
 }
-func (m *mockNoSyncerBackend) Start(_ context.Context, _ string) error    { return nil }
-func (m *mockNoSyncerBackend) Stop(_ context.Context, _ string) error     { return nil }
-func (m *mockNoSyncerBackend) Destroy(_ context.Context, _ string) error  { return nil }
-func (m *mockNoSyncerBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (m *mockNoSyncerBackend) List(_ context.Context) ([]backend.VMInfo, error) {
-	return nil, nil
-}
-func (m *mockNoSyncerBackend) Exec(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
-	return backend.ExecResult{}, nil
-}
-func (m *mockNoSyncerBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
-	if s, ok := m.statusMap[name]; ok {
-		return s, nil
+
+func (s *testSyncerBackend) SyncDiff(_ context.Context, name, guestPath, hostPath string) (string, error) {
+	if s.syncDiffErr != nil {
+		return "", s.syncDiffErr
 	}
-	return "", backend.ErrVMNotFound
+	s.syncDiffCalls = append(s.syncDiffCalls, syncCall{VMName: name, HostPath: hostPath, GuestPath: guestPath})
+	return s.syncDiffRes, nil
 }
 
-// setupSyncTest configures the test environment with a mock backend.
-func setupSyncTest(t *testing.T, mb interface {
-	backend.Backend
-}) {
+// newSyncerBackend creates a testSyncerBackend with a running VM.
+func newSyncerBackend(t *testing.T, vmNames ...string) *testSyncerBackend {
+	t.Helper()
+	mb := memory.New()
+	for _, name := range vmNames {
+		require.NoError(t, mb.Create(context.Background(), name, backend.VMConfig{}))
+	}
+	return &testSyncerBackend{Backend: mb}
+}
+
+// ---------------------------------------------------------------------------
+// Test Setup
+// ---------------------------------------------------------------------------
+
+// setupSyncTest configures the test environment with any backend.Backend.
+func setupSyncTest(t *testing.T, b backend.Backend) {
 	t.Helper()
 	newRootTestEnv(t)
 
@@ -155,7 +105,7 @@ func setupSyncTest(t *testing.T, mb interface {
 
 	origGetBackend := getBackendFunc
 	getBackendFunc = func(name string) (backend.Backend, error) {
-		return mb.(backend.Backend), nil
+		return b, nil
 	}
 	t.Cleanup(func() { getBackendFunc = origGetBackend })
 }
@@ -233,12 +183,8 @@ func TestSyncFromCommand_ArgValidation(t *testing.T) {
 // --- Sync To tests ---
 
 func TestSyncTo_HumanOutput(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	setupSyncTest(t, sb)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -258,19 +204,15 @@ func TestSyncTo_HumanOutput(t *testing.T) {
 	require.NoError(t, execErr)
 	assert.Contains(t, buf.String(), "Synced ./src -> myvm:/home/dev/src")
 
-	require.Len(t, mb.syncToCalls, 1)
-	assert.Equal(t, "myvm", mb.syncToCalls[0].VMName)
-	assert.Equal(t, "./src", mb.syncToCalls[0].HostPath)
-	assert.Equal(t, "/home/dev/src", mb.syncToCalls[0].GuestPath)
+	require.Len(t, sb.syncToCalls, 1)
+	assert.Equal(t, "myvm", sb.syncToCalls[0].VMName)
+	assert.Equal(t, "./src", sb.syncToCalls[0].HostPath)
+	assert.Equal(t, "/home/dev/src", sb.syncToCalls[0].GuestPath)
 }
 
 func TestSyncTo_JSONOutput(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	setupSyncTest(t, sb)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -302,29 +244,21 @@ func TestSyncTo_JSONOutput(t *testing.T) {
 }
 
 func TestSyncTo_DefaultGuestPath(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"--json", "sync", "to", "myvm", "./src"})
 	execErr := root.Execute()
 
 	require.NoError(t, execErr)
-	require.Len(t, mb.syncToCalls, 1)
-	assert.Equal(t, "~/src", mb.syncToCalls[0].GuestPath, "default guest path should be ~/<basename>")
+	require.Len(t, sb.syncToCalls, 1)
+	assert.Equal(t, "~/src", sb.syncToCalls[0].GuestPath, "default guest path should be ~/<basename>")
 }
 
 func TestSyncTo_VMNotFound(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t) // no VMs created
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "nonexistent", "./src"})
@@ -338,12 +272,9 @@ func TestSyncTo_VMNotFound(t *testing.T) {
 }
 
 func TestSyncTo_VMNotRunning(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusStopped},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	require.NoError(t, sb.Stop(context.Background(), "myvm"))
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "myvm", "./src"})
@@ -354,12 +285,13 @@ func TestSyncTo_VMNotRunning(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "vm_not_running", cliErr.Code)
 	assert.Contains(t, cliErr.Message, "sd start")
-	assert.Empty(t, mb.syncToCalls, "stopped VM must not trigger sync")
+	assert.Empty(t, sb.syncToCalls, "stopped VM must not trigger sync")
 }
 
 func TestSyncTo_BackendUnavailable(t *testing.T) {
-	mb := &mockSyncBackend{name: "mock", available: false}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t)
+	sb.SetMethodError("available", fmt.Errorf("backend not available"))
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "myvm", "./src"})
@@ -372,11 +304,9 @@ func TestSyncTo_BackendUnavailable(t *testing.T) {
 }
 
 func TestSyncTo_NonSyncerBackend(t *testing.T) {
-	mb := &mockNoSyncerBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
+	// Use plain memory.Backend (no Syncer) to test non-Syncer path
+	mb := memory.New()
+	require.NoError(t, mb.Create(context.Background(), "myvm", backend.VMConfig{}))
 	setupSyncTest(t, mb)
 
 	root := RootCmd()
@@ -390,13 +320,9 @@ func TestSyncTo_NonSyncerBackend(t *testing.T) {
 }
 
 func TestSyncTo_SyncError(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:       "mock",
-		available:  true,
-		statusMap:  map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncToErr:  fmt.Errorf("rsync failed: connection refused"),
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncToErr = fmt.Errorf("rsync failed: connection refused")
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "myvm", "./src"})
@@ -410,8 +336,8 @@ func TestSyncTo_SyncError(t *testing.T) {
 }
 
 func TestSyncTo_EmptyName(t *testing.T) {
-	mb := &mockSyncBackend{name: "mock", available: true}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t)
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "", "./src"})
@@ -443,12 +369,9 @@ func TestSyncTo_BackendGetError(t *testing.T) {
 }
 
 func TestSyncTo_StatusCheckError(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusErr: fmt.Errorf("connection refused"),
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t)
+	sb.SetMethodError("status", fmt.Errorf("connection refused"))
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "myvm", "./src"})
@@ -462,13 +385,9 @@ func TestSyncTo_StatusCheckError(t *testing.T) {
 }
 
 func TestSyncTo_SyncErrVMNotRunning(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:       "mock",
-		available:  true,
-		statusMap:  map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncToErr:  backend.ErrVMNotRunning,
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncToErr = backend.ErrVMNotRunning
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "myvm", "./src"})
@@ -481,13 +400,9 @@ func TestSyncTo_SyncErrVMNotRunning(t *testing.T) {
 }
 
 func TestSyncTo_SyncErrVMNotFound(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:       "mock",
-		available:  true,
-		statusMap:  map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncToErr:  backend.ErrVMNotFound,
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncToErr = backend.ErrVMNotFound
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "myvm", "./src"})
@@ -502,12 +417,8 @@ func TestSyncTo_SyncErrVMNotFound(t *testing.T) {
 // --- Sync From tests ---
 
 func TestSyncFrom_HumanOutput(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	setupSyncTest(t, sb)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -527,19 +438,15 @@ func TestSyncFrom_HumanOutput(t *testing.T) {
 	require.NoError(t, execErr)
 	assert.Contains(t, buf.String(), "Synced myvm:/home/dev/src -> ./src")
 
-	require.Len(t, mb.syncFromCalls, 1)
-	assert.Equal(t, "myvm", mb.syncFromCalls[0].VMName)
-	assert.Equal(t, "/home/dev/src", mb.syncFromCalls[0].GuestPath)
-	assert.Equal(t, "./src", mb.syncFromCalls[0].HostPath)
+	require.Len(t, sb.syncFromCalls, 1)
+	assert.Equal(t, "myvm", sb.syncFromCalls[0].VMName)
+	assert.Equal(t, "/home/dev/src", sb.syncFromCalls[0].GuestPath)
+	assert.Equal(t, "./src", sb.syncFromCalls[0].HostPath)
 }
 
 func TestSyncFrom_JSONOutput(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	setupSyncTest(t, sb)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -571,29 +478,21 @@ func TestSyncFrom_JSONOutput(t *testing.T) {
 }
 
 func TestSyncFrom_DefaultHostPath(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"--json", "sync", "from", "myvm", "/home/dev/project"})
 	execErr := root.Execute()
 
 	require.NoError(t, execErr)
-	require.Len(t, mb.syncFromCalls, 1)
-	assert.Equal(t, "./project", mb.syncFromCalls[0].HostPath, "default host path should be ./<basename>")
+	require.Len(t, sb.syncFromCalls, 1)
+	assert.Equal(t, "./project", sb.syncFromCalls[0].HostPath, "default host path should be ./<basename>")
 }
 
 func TestSyncFrom_VMNotFound(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t) // no VMs
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "from", "nonexistent", "/home/dev/src"})
@@ -606,12 +505,9 @@ func TestSyncFrom_VMNotFound(t *testing.T) {
 }
 
 func TestSyncFrom_VMNotRunning(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusStopped},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	require.NoError(t, sb.Stop(context.Background(), "myvm"))
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "from", "myvm", "/home/dev/src"})
@@ -621,17 +517,13 @@ func TestSyncFrom_VMNotRunning(t *testing.T) {
 	cliErr, ok := err.(ui.CLIError)
 	require.True(t, ok)
 	assert.Equal(t, "vm_not_running", cliErr.Code)
-	assert.Empty(t, mb.syncFromCalls)
+	assert.Empty(t, sb.syncFromCalls)
 }
 
 func TestSyncFrom_SyncError(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncFromErr: fmt.Errorf("rsync failed"),
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncFromErr = fmt.Errorf("rsync failed")
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "from", "myvm", "/home/dev/src"})
@@ -644,8 +536,8 @@ func TestSyncFrom_SyncError(t *testing.T) {
 }
 
 func TestSyncFrom_EmptyName(t *testing.T) {
-	mb := &mockSyncBackend{name: "mock", available: true}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t)
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "from", "", "/home/dev/src"})
@@ -658,11 +550,9 @@ func TestSyncFrom_EmptyName(t *testing.T) {
 }
 
 func TestSyncFrom_NonSyncerBackend(t *testing.T) {
-	mb := &mockNoSyncerBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
+	// Use plain memory.Backend (no Syncer) to test non-Syncer path
+	mb := memory.New()
+	require.NoError(t, mb.Create(context.Background(), "myvm", backend.VMConfig{}))
 	setupSyncTest(t, mb)
 
 	root := RootCmd()
@@ -676,13 +566,9 @@ func TestSyncFrom_NonSyncerBackend(t *testing.T) {
 }
 
 func TestSyncFrom_SyncErrVMNotRunning(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncFromErr: backend.ErrVMNotRunning,
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncFromErr = backend.ErrVMNotRunning
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "from", "myvm", "/home/dev/src"})
@@ -695,13 +581,9 @@ func TestSyncFrom_SyncErrVMNotRunning(t *testing.T) {
 }
 
 func TestSyncFrom_SyncErrVMNotFound(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncFromErr: backend.ErrVMNotFound,
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncFromErr = backend.ErrVMNotFound
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "from", "myvm", "/home/dev/src"})
@@ -716,13 +598,9 @@ func TestSyncFrom_SyncErrVMNotFound(t *testing.T) {
 // --- Diff tests ---
 
 func TestSyncFrom_DiffHumanOutput(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncDiffRes: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n",
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncDiffRes = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
+	setupSyncTest(t, sb)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -743,18 +621,14 @@ func TestSyncFrom_DiffHumanOutput(t *testing.T) {
 	assert.Contains(t, buf.String(), "--- a/file.txt")
 	assert.Contains(t, buf.String(), "+new")
 
-	require.Len(t, mb.syncDiffCalls, 1)
-	assert.Empty(t, mb.syncFromCalls, "diff must not call SyncFrom")
+	require.Len(t, sb.syncDiffCalls, 1)
+	assert.Empty(t, sb.syncFromCalls, "diff must not call SyncFrom")
 }
 
 func TestSyncFrom_DiffJSONOutput(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncDiffRes: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n",
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncDiffRes = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
+	setupSyncTest(t, sb)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -786,13 +660,9 @@ func TestSyncFrom_DiffJSONOutput(t *testing.T) {
 }
 
 func TestSyncFrom_DiffError(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncDiffErr: fmt.Errorf("diff failed"),
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncDiffErr = fmt.Errorf("diff failed")
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "from", "myvm", "/home/dev/src", "--diff"})
@@ -806,13 +676,9 @@ func TestSyncFrom_DiffError(t *testing.T) {
 }
 
 func TestSyncFrom_DiffVMNotFound(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncDiffErr: backend.ErrVMNotFound,
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncDiffErr = backend.ErrVMNotFound
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "from", "myvm", "/home/dev/src", "--diff"})
@@ -842,12 +708,8 @@ func TestProperty_SyncToJSONAlwaysValid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mb := &mockSyncBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{tc.vmName: backend.StatusRunning},
-			}
-			setupSyncTest(t, mb)
+			sb := newSyncerBackend(t, tc.vmName)
+			setupSyncTest(t, sb)
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -899,12 +761,8 @@ func TestProperty_SyncFromJSONAlwaysValid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mb := &mockSyncBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{tc.vmName: backend.StatusRunning},
-			}
-			setupSyncTest(t, mb)
+			sb := newSyncerBackend(t, tc.vmName)
+			setupSyncTest(t, sb)
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -948,11 +806,8 @@ func TestProperty_SyncFromJSONAlwaysValid(t *testing.T) {
 // Property: error codes are always snake_case.
 func TestProperty_SyncErrorCodesSnakeCase(t *testing.T) {
 	t.Run("vm_not_found", func(t *testing.T) {
-		mb := &mockSyncBackend{
-			name: "mock", available: true,
-			statusMap: map[string]backend.VMStatus{},
-		}
-		setupSyncTest(t, mb)
+		sb := newSyncerBackend(t) // no VMs
+		setupSyncTest(t, sb)
 		root := RootCmd()
 		root.SetArgs([]string{"sync", "to", "ghost", "./src"})
 		err := root.Execute()
@@ -962,11 +817,9 @@ func TestProperty_SyncErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("vm_not_running", func(t *testing.T) {
-		mb := &mockSyncBackend{
-			name: "mock", available: true,
-			statusMap: map[string]backend.VMStatus{"vm1": backend.StatusStopped},
-		}
-		setupSyncTest(t, mb)
+		sb := newSyncerBackend(t, "vm1")
+		require.NoError(t, sb.Stop(context.Background(), "vm1"))
+		setupSyncTest(t, sb)
 		root := RootCmd()
 		root.SetArgs([]string{"sync", "to", "vm1", "./src"})
 		err := root.Execute()
@@ -976,8 +829,9 @@ func TestProperty_SyncErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("backend_unavailable", func(t *testing.T) {
-		mb := &mockSyncBackend{name: "mock", available: false}
-		setupSyncTest(t, mb)
+		sb := newSyncerBackend(t)
+		sb.SetMethodError("available", fmt.Errorf("backend not available"))
+		setupSyncTest(t, sb)
 		root := RootCmd()
 		root.SetArgs([]string{"sync", "to", "vm1", "./src"})
 		err := root.Execute()
@@ -987,12 +841,9 @@ func TestProperty_SyncErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("sync_failed", func(t *testing.T) {
-		mb := &mockSyncBackend{
-			name: "mock", available: true,
-			statusMap:  map[string]backend.VMStatus{"vm1": backend.StatusRunning},
-			syncToErr:  fmt.Errorf("rsync error"),
-		}
-		setupSyncTest(t, mb)
+		sb := newSyncerBackend(t, "vm1")
+		sb.syncToErr = fmt.Errorf("rsync error")
+		setupSyncTest(t, sb)
 		root := RootCmd()
 		root.SetArgs([]string{"sync", "to", "vm1", "./src"})
 		err := root.Execute()
@@ -1002,8 +853,8 @@ func TestProperty_SyncErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("invalid_argument_empty_name", func(t *testing.T) {
-		mb := &mockSyncBackend{name: "mock", available: true}
-		setupSyncTest(t, mb)
+		sb := newSyncerBackend(t)
+		setupSyncTest(t, sb)
 		root := RootCmd()
 		root.SetArgs([]string{"sync", "to", "", "./src"})
 		err := root.Execute()
@@ -1013,10 +864,9 @@ func TestProperty_SyncErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("sync_not_supported", func(t *testing.T) {
-		mb := &mockNoSyncerBackend{
-			name: "mock", available: true,
-			statusMap: map[string]backend.VMStatus{"vm1": backend.StatusRunning},
-		}
+		// Use plain memory.Backend (no Syncer)
+		mb := memory.New()
+		require.NoError(t, mb.Create(context.Background(), "vm1", backend.VMConfig{}))
 		setupSyncTest(t, mb)
 		root := RootCmd()
 		root.SetArgs([]string{"sync", "to", "vm1", "./src"})
@@ -1032,19 +882,15 @@ func TestProperty_SyncToRunningVM_CallsBackendOnce(t *testing.T) {
 	names := []string{"vm1", "vm2", "test-vm"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockSyncBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{name: backend.StatusRunning},
-			}
-			setupSyncTest(t, mb)
+			sb := newSyncerBackend(t, name)
+			setupSyncTest(t, sb)
 
 			root := RootCmd()
 			root.SetArgs([]string{"--json", "sync", "to", name, "./src"})
 			err := root.Execute()
 			require.NoError(t, err)
-			require.Len(t, mb.syncToCalls, 1, "sync to must call backend exactly once for %q", name)
-			assert.Equal(t, name, mb.syncToCalls[0].VMName)
+			require.Len(t, sb.syncToCalls, 1, "sync to must call backend exactly once for %q", name)
+			assert.Equal(t, name, sb.syncToCalls[0].VMName)
 		})
 	}
 }
@@ -1054,18 +900,15 @@ func TestProperty_SyncToStoppedVM_NeverCallsBackend(t *testing.T) {
 	statuses := []backend.VMStatus{backend.StatusStopped, backend.StatusCreating, backend.StatusError}
 	for _, status := range statuses {
 		t.Run(string(status), func(t *testing.T) {
-			mb := &mockSyncBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{"vm1": status},
-			}
-			setupSyncTest(t, mb)
+			sb := newSyncerBackend(t, "vm1")
+			require.NoError(t, sb.SetStatus("vm1", status))
+			setupSyncTest(t, sb)
 
 			root := RootCmd()
 			root.SetArgs([]string{"sync", "to", "vm1", "./src"})
 			err := root.Execute()
 			require.Error(t, err)
-			assert.Empty(t, mb.syncToCalls, "sync to on non-running VM must not call SyncTo for status %s", status)
+			assert.Empty(t, sb.syncToCalls, "sync to on non-running VM must not call SyncTo for status %s", status)
 		})
 	}
 }
@@ -1075,18 +918,14 @@ func TestProperty_SyncToNonexistentVM_NeverCallsBackend(t *testing.T) {
 	names := []string{"ghost", "nonexistent", "missing-vm"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockSyncBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{},
-			}
-			setupSyncTest(t, mb)
+			sb := newSyncerBackend(t) // no VMs
+			setupSyncTest(t, sb)
 
 			root := RootCmd()
 			root.SetArgs([]string{"sync", "to", name, "./src"})
 			err := root.Execute()
 			require.Error(t, err)
-			assert.Empty(t, mb.syncToCalls, "sync to nonexistent VM must not call SyncTo for %q", name)
+			assert.Empty(t, sb.syncToCalls, "sync to nonexistent VM must not call SyncTo for %q", name)
 		})
 	}
 }
@@ -1096,50 +935,38 @@ func TestProperty_SyncFromRunningVM_CallsBackendOnce(t *testing.T) {
 	names := []string{"vm1", "vm2", "test-vm"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockSyncBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{name: backend.StatusRunning},
-			}
-			setupSyncTest(t, mb)
+			sb := newSyncerBackend(t, name)
+			setupSyncTest(t, sb)
 
 			root := RootCmd()
 			root.SetArgs([]string{"--json", "sync", "from", name, "/home/dev/src"})
 			err := root.Execute()
 			require.NoError(t, err)
-			require.Len(t, mb.syncFromCalls, 1, "sync from must call backend exactly once for %q", name)
-			assert.Equal(t, name, mb.syncFromCalls[0].VMName)
+			require.Len(t, sb.syncFromCalls, 1, "sync from must call backend exactly once for %q", name)
+			assert.Equal(t, name, sb.syncFromCalls[0].VMName)
 		})
 	}
 }
 
 // Property: diff mode calls SyncDiff but not SyncFrom.
 func TestProperty_SyncDiff_CallsDiffNotSync(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncDiffRes: "some diff output",
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncDiffRes = "some diff output"
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"--json", "sync", "from", "myvm", "/home/dev/src", "--diff"})
 	err := root.Execute()
 
 	require.NoError(t, err)
-	require.Len(t, mb.syncDiffCalls, 1, "diff must call SyncDiff exactly once")
-	assert.Empty(t, mb.syncFromCalls, "diff must not call SyncFrom")
+	require.Len(t, sb.syncDiffCalls, 1, "diff must call SyncDiff exactly once")
+	assert.Empty(t, sb.syncFromCalls, "diff must not call SyncFrom")
 }
 
 // Property: JSON required fields for sync to.
 func TestProperty_SyncToJSONRequiredFields(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	setupSyncTest(t, sb)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -1174,13 +1001,9 @@ func TestProperty_SyncToJSONRequiredFields(t *testing.T) {
 
 // Property: diff JSON required fields.
 func TestProperty_SyncDiffJSONRequiredFields(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:        "mock",
-		available:   true,
-		statusMap:   map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		syncDiffRes: "diff output",
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t, "myvm")
+	sb.syncDiffRes = "diff output"
+	setupSyncTest(t, sb)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -1212,12 +1035,8 @@ func TestProperty_SyncDiffJSONRequiredFields(t *testing.T) {
 
 // Property: error JSON format is consistent.
 func TestProperty_SyncErrorJSONFormat(t *testing.T) {
-	mb := &mockSyncBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{},
-	}
-	setupSyncTest(t, mb)
+	sb := newSyncerBackend(t) // no VMs
+	setupSyncTest(t, sb)
 
 	root := RootCmd()
 	root.SetArgs([]string{"sync", "to", "nonexistent", "./src"})

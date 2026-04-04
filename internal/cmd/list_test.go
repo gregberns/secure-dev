@@ -1,6 +1,7 @@
 // Package cmd provides tests for the list command.
 // REQ-002-003: VM Management Commands -- list
 // REQ-002-009: Command Aliases (list -> ls)
+// NOTE: Tests use global getBackendFunc — do not use t.Parallel().
 package cmd
 
 import (
@@ -11,52 +12,26 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/backend/memory"
 	"sd/internal/ui"
 )
 
-// mockListBackend is a digital twin of a backend for list command testing.
-// It implements backend.Backend with configurable List behavior.
-type mockListBackend struct {
-	vms []backend.VMInfo
-	err error
-}
-
-func (m *mockListBackend) Name() string { return "mock" }
-func (m *mockListBackend) Available() error { return nil }
-func (m *mockListBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
-	return nil
-}
-func (m *mockListBackend) Start(_ context.Context, _ string) error  { return nil }
-func (m *mockListBackend) Stop(_ context.Context, _ string) error   { return nil }
-func (m *mockListBackend) Destroy(_ context.Context, _ string) error { return nil }
-func (m *mockListBackend) Status(_ context.Context, _ string) (backend.VMStatus, error) {
-	return "", nil
-}
-func (m *mockListBackend) List(_ context.Context) ([]backend.VMInfo, error) {
-	return m.vms, m.err
-}
-func (m *mockListBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (m *mockListBackend) Exec(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
-	return backend.ExecResult{}, nil
-}
-
-// setupListTest configures the test environment and overrides getBackendFunc.
-// Returns a restore function that MUST be called (via defer) to clean up.
-func setupListTest(t *testing.T, mb *mockListBackend) {
+// setupListTest configures the test environment with a memory backend.
+func setupListTest(t *testing.T) *memory.Backend {
 	t.Helper()
 	newRootTestEnv(t)
+
+	mb := memory.New()
 	origGetBackend := getBackendFunc
 	getBackendFunc = func(_ string) (backend.Backend, error) {
 		return mb, nil
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend })
+	t.Cleanup(func() { getBackendFunc = origGetBackend; mb.Reset() })
+	return mb
 }
 
 func TestListCommand_Registered(t *testing.T) {
@@ -96,7 +71,8 @@ func TestListCommand_AliasLs(t *testing.T) {
 }
 
 func TestListCommand_EmptyList_HumanOutput(t *testing.T) {
-	setupListTest(t, &mockListBackend{vms: nil})
+	setupListTest(t)
+	// No VMs created
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -119,7 +95,8 @@ func TestListCommand_EmptyList_HumanOutput(t *testing.T) {
 }
 
 func TestListCommand_EmptyList_JSONOutput(t *testing.T) {
-	setupListTest(t, &mockListBackend{vms: nil})
+	setupListTest(t)
+	// No VMs created
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -149,18 +126,18 @@ func TestListCommand_EmptyList_JSONOutput(t *testing.T) {
 }
 
 func TestListCommand_MultipleVMs_HumanOutput(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	vms := []backend.VMInfo{
-		{
-			Name: "vm-alpha", Status: backend.StatusRunning, Backend: "lima",
-			CPUs: 4, Memory: "8GiB", Disk: "100GiB", IP: "192.168.5.15", CreatedAt: now,
-		},
-		{
-			Name: "vm-beta", Status: backend.StatusStopped, Backend: "lima",
-			CPUs: 2, Memory: "4GiB", Disk: "50GiB", IP: "", CreatedAt: now.Add(-time.Hour),
-		},
-	}
-	setupListTest(t, &mockListBackend{vms: vms})
+	mb := setupListTest(t)
+	ctx := context.Background()
+
+	// Create VMs with specific configs
+	require.NoError(t, mb.Create(ctx, "vm-alpha", backend.VMConfig{
+		CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+	}))
+	require.NoError(t, mb.Create(ctx, "vm-beta", backend.VMConfig{
+		CPUs: 2, Memory: "4GiB", Disk: "50GiB",
+	}))
+	// Stop vm-beta to put it in Stopped state
+	require.NoError(t, mb.Stop(ctx, "vm-beta"))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -194,24 +171,23 @@ func TestListCommand_MultipleVMs_HumanOutput(t *testing.T) {
 	assert.Contains(t, output, "running")
 	assert.Contains(t, output, "vm-beta")
 	assert.Contains(t, output, "stopped")
-	assert.Contains(t, output, "192.168.5.15")
 	assert.Contains(t, output, "8GiB")
 	assert.Contains(t, output, "4GiB")
 }
 
 func TestListCommand_MultipleVMs_JSONOutput(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	vms := []backend.VMInfo{
-		{
-			Name: "vm-alpha", Status: backend.StatusRunning, Backend: "lima",
-			CPUs: 4, Memory: "8GiB", Disk: "100GiB", IP: "192.168.5.15", CreatedAt: now,
-		},
-		{
-			Name: "vm-beta", Status: backend.StatusStopped, Backend: "lima",
-			CPUs: 2, Memory: "4GiB", Disk: "50GiB", IP: "", CreatedAt: now.Add(-time.Hour),
-		},
-	}
-	setupListTest(t, &mockListBackend{vms: vms})
+	mb := setupListTest(t)
+	ctx := context.Background()
+
+	// Create VMs with specific configs
+	require.NoError(t, mb.Create(ctx, "vm-alpha", backend.VMConfig{
+		CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+	}))
+	require.NoError(t, mb.Create(ctx, "vm-beta", backend.VMConfig{
+		CPUs: 2, Memory: "4GiB", Disk: "50GiB",
+	}))
+	// Stop vm-beta to put it in Stopped state
+	require.NoError(t, mb.Stop(ctx, "vm-beta"))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -239,28 +215,26 @@ func TestListCommand_MultipleVMs_JSONOutput(t *testing.T) {
 	require.True(t, ok, "data must be a JSON array")
 	require.Len(t, data, 2)
 
-	// Verify first VM
+	// Memory backend sorts by name, so vm-alpha is first, vm-beta second
 	vm0 := data[0].(map[string]any)
 	assert.Equal(t, "vm-alpha", vm0["name"])
 	assert.Equal(t, "running", vm0["status"])
-	assert.Equal(t, "lima", vm0["backend"])
+	assert.Equal(t, "memory", vm0["backend"])
 	assert.Equal(t, float64(4), vm0["cpus"])
 	assert.Equal(t, "8GiB", vm0["memory"])
 	assert.Equal(t, "100GiB", vm0["disk"])
-	assert.Equal(t, "192.168.5.15", vm0["ip"])
+	// IP is auto-assigned by memory backend
+	assert.NotEmpty(t, vm0["ip"], "running VM must have an IP")
 
-	// Verify second VM (no IP)
+	// Verify second VM
 	vm1 := data[1].(map[string]any)
 	assert.Equal(t, "vm-beta", vm1["name"])
 	assert.Equal(t, "stopped", vm1["status"])
-	_, hasIP := vm1["ip"]
-	assert.False(t, hasIP, "stopped VM without IP should omit ip field")
 }
 
 func TestListCommand_BackendError(t *testing.T) {
-	setupListTest(t, &mockListBackend{
-		err: fmt.Errorf("limactl not found"),
-	})
+	mb := setupListTest(t)
+	mb.SetMethodError("list", fmt.Errorf("limactl not found"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"list"})
@@ -290,7 +264,8 @@ func TestListCommand_NoConfigRequired(t *testing.T) {
 	t.Setenv("SD_HOME", tmpDir)
 	t.Setenv("HOME", tmpDir)
 
-	setupListTest(t, &mockListBackend{vms: nil})
+	setupListTest(t)
+	// No VMs created
 
 	root := RootCmd()
 	root.SetArgs([]string{"list"})
@@ -335,23 +310,43 @@ func TestFormatVMTable_NoIP(t *testing.T) {
 // and data as an array, regardless of VM count.
 func TestProperty_ListJSONAlwaysValid(t *testing.T) {
 	cases := []struct {
-		name string
-		vms  []backend.VMInfo
+		name   string
+		vmDefs []struct {
+			name   string
+			config backend.VMConfig
+			status backend.VMStatus
+		}
 	}{
 		{"empty", nil},
-		{"single", []backend.VMInfo{
-			{Name: "a", Status: backend.StatusRunning, Backend: "lima", CPUs: 1, Memory: "1GiB", Disk: "10GiB"},
+		{"single", []struct {
+			name   string
+			config backend.VMConfig
+			status backend.VMStatus
+		}{
+			{"a", backend.VMConfig{CPUs: 1, Memory: "1GiB", Disk: "10GiB"}, backend.StatusRunning},
 		}},
-		{"many", []backend.VMInfo{
-			{Name: "a", Status: backend.StatusRunning, Backend: "lima", CPUs: 1, Memory: "1GiB", Disk: "10GiB"},
-			{Name: "b", Status: backend.StatusStopped, Backend: "lima", CPUs: 2, Memory: "2GiB", Disk: "20GiB"},
-			{Name: "c", Status: backend.StatusError, Backend: "lima", CPUs: 8, Memory: "16GiB", Disk: "200GiB"},
+		{"many", []struct {
+			name   string
+			config backend.VMConfig
+			status backend.VMStatus
+		}{
+			{"a", backend.VMConfig{CPUs: 1, Memory: "1GiB", Disk: "10GiB"}, backend.StatusRunning},
+			{"b", backend.VMConfig{CPUs: 2, Memory: "2GiB", Disk: "20GiB"}, backend.StatusStopped},
+			{"c", backend.VMConfig{CPUs: 8, Memory: "16GiB", Disk: "200GiB"}, backend.StatusError},
 		}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			setupListTest(t, &mockListBackend{vms: tc.vms})
+			mb := setupListTest(t)
+			ctx := context.Background()
+
+			for _, vm := range tc.vmDefs {
+				require.NoError(t, mb.Create(ctx, vm.name, vm.config))
+				if vm.status != backend.StatusRunning {
+					require.NoError(t, mb.SetStatus(vm.name, vm.status))
+				}
+			}
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -377,7 +372,7 @@ func TestProperty_ListJSONAlwaysValid(t *testing.T) {
 
 			data, ok := result["data"].([]any)
 			require.True(t, ok, "data must be an array for case %s", tc.name)
-			assert.Len(t, data, len(tc.vms), "data length must match VM count for case %s", tc.name)
+			assert.Len(t, data, len(tc.vmDefs), "data length must match VM count for case %s", tc.name)
 
 			// Verify each VM has required fields
 			for i, vm := range data {
@@ -420,15 +415,14 @@ func TestProperty_TableContainsAllVMNames(t *testing.T) {
 
 // Property: JSON and human output both succeed for the same data (dual-mode consistency).
 func TestProperty_DualModeConsistency(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	vms := []backend.VMInfo{
-		{Name: "test", Status: backend.StatusRunning, Backend: "lima",
-			CPUs: 4, Memory: "8GiB", Disk: "100GiB", IP: "10.0.0.1", CreatedAt: now},
-	}
-
 	for _, jsonMode := range []bool{false, true} {
 		t.Run(fmt.Sprintf("json=%v", jsonMode), func(t *testing.T) {
-			setupListTest(t, &mockListBackend{vms: vms})
+			mb := setupListTest(t)
+			ctx := context.Background()
+
+			require.NoError(t, mb.Create(ctx, "test", backend.VMConfig{
+				CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+			}))
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()

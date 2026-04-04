@@ -1,5 +1,7 @@
 // Package cmd provides tests for the diff command.
 // REQ-004-018: CI Workflow Change Detection
+//
+// NOTE: Tests use global getBackendFunc — do not use t.Parallel().
 package cmd
 
 import (
@@ -14,80 +16,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/backend/memory"
 	"sd/internal/ui"
 )
 
 // ---------------------------------------------------------------------------
-// Digital Twins
+// Test Setup
 // ---------------------------------------------------------------------------
 
-// mockDiffBackend is a digital twin of a backend for diff command testing.
-// It implements backend.Backend with configurable Exec behavior.
-type mockDiffBackend struct {
-	name      string
-	available bool
-	statusMap map[string]backend.VMStatus
-	statusErr error
-	// execResponses maps command substrings to results.
-	// The first matching key is returned.
-	execResponses map[string]backend.ExecResult
-	execErr       error
-	// Records all Exec calls
-	diffExecCalls []diffExecCall
-}
-
-type diffExecCall struct {
-	VMName  string
-	Command []string
-}
-
-func (m *mockDiffBackend) Name() string { return m.name }
-func (m *mockDiffBackend) Available() error {
-	if m.available {
-		return nil
-	}
-	return fmt.Errorf("backend not available")
-}
-func (m *mockDiffBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
-	return nil
-}
-func (m *mockDiffBackend) Start(_ context.Context, _ string) error    { return nil }
-func (m *mockDiffBackend) Stop(_ context.Context, _ string) error     { return nil }
-func (m *mockDiffBackend) Destroy(_ context.Context, _ string) error  { return nil }
-func (m *mockDiffBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (m *mockDiffBackend) List(_ context.Context) ([]backend.VMInfo, error) {
-	return nil, nil
-}
-func (m *mockDiffBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
-	if m.statusErr != nil {
-		return "", m.statusErr
-	}
-	if s, ok := m.statusMap[name]; ok {
-		return s, nil
-	}
-	return "", backend.ErrVMNotFound
-}
-func (m *mockDiffBackend) Exec(_ context.Context, name string, command []string) (backend.ExecResult, error) {
-	if m.execErr != nil {
-		return backend.ExecResult{}, m.execErr
-	}
-	m.diffExecCalls = append(m.diffExecCalls, diffExecCall{VMName: name, Command: command})
-
-	// Match by command string
-	cmdStr := strings.Join(command, " ")
-	for key, result := range m.execResponses {
-		if strings.Contains(cmdStr, key) {
-			return result, nil
-		}
-	}
-
-	return backend.ExecResult{ExitCode: 0, Stdout: ""}, nil
-}
-
-// setupDiffTest configures the test environment with a mock backend.
-func setupDiffTest(t *testing.T, mb *mockDiffBackend) {
+// setupDiffTest configures the test environment with a memory backend.
+func setupDiffTest(t *testing.T, mb *memory.Backend) {
 	t.Helper()
 	newRootTestEnv(t)
 
@@ -98,17 +36,25 @@ func setupDiffTest(t *testing.T, mb *mockDiffBackend) {
 	t.Cleanup(func() { getBackendFunc = origGetBackend })
 }
 
-// helper to build a standard diff mock backend
-func newDiffMock(gitStatus string, hooksOutput string) *mockDiffBackend {
-	return &mockDiffBackend{
-		name:      "mock-diff",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"test-vm": backend.StatusRunning},
-		execResponses: map[string]backend.ExecResult{
-			"git status --porcelain": {ExitCode: 0, Stdout: "true\n" + gitStatus},
-			"git rev-parse --git-dir": {ExitCode: 0, Stdout: ".git\n" + hooksOutput},
-		},
-	}
+// newDiffMemBackend builds a memory backend with "test-vm" running and an
+// exec handler that responds to git status and git rev-parse commands.
+func newDiffMemBackend(t *testing.T, gitStatus string, hooksOutput string) *memory.Backend {
+	t.Helper()
+	mb := memory.New()
+	require.NoError(t, mb.Create(context.Background(), "test-vm", backend.VMConfig{}))
+
+	mb.SetExecHandler(func(_ context.Context, name string, command []string) (backend.ExecResult, error) {
+		cmdStr := strings.Join(command, " ")
+		if strings.Contains(cmdStr, "git status --porcelain") {
+			return backend.ExecResult{ExitCode: 0, Stdout: "true\n" + gitStatus}, nil
+		}
+		if strings.Contains(cmdStr, "git rev-parse --git-dir") {
+			return backend.ExecResult{ExitCode: 0, Stdout: ".git\n" + hooksOutput}, nil
+		}
+		return backend.ExecResult{ExitCode: 0, Stdout: ""}, nil
+	})
+
+	return mb
 }
 
 // --- Unit tests: Registration ---
@@ -138,7 +84,7 @@ func TestDiffCommand_NoConfigRequired(t *testing.T) {
 }
 
 func TestDiffCommand_ExactArgs(t *testing.T) {
-	mb := newDiffMock("", "")
+	mb := newDiffMemBackend(t, "", "")
 	setupDiffTest(t, mb)
 
 	root := RootCmd()
@@ -159,7 +105,7 @@ func TestDiffCommand_MissingName(t *testing.T) {
 // --- Unit tests: Human output ---
 
 func TestDiffCommand_HumanOutput_NoChanges(t *testing.T) {
-	mb := newDiffMock("", "")
+	mb := newDiffMemBackend(t, "", "")
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -183,7 +129,7 @@ func TestDiffCommand_HumanOutput_NoChanges(t *testing.T) {
 
 func TestDiffCommand_HumanOutput_WithCIChanges(t *testing.T) {
 	gitStatus := "M .github/workflows/build.yml\nA .gitlab-ci.yml\nM src/main.go"
-	mb := newDiffMock(gitStatus, "")
+	mb := newDiffMemBackend(t, gitStatus, "")
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -212,7 +158,7 @@ func TestDiffCommand_HumanOutput_WithCIChanges(t *testing.T) {
 
 func TestDiffCommand_HumanOutput_NoCIChanges(t *testing.T) {
 	gitStatus := "M src/main.go\nA README.md"
-	mb := newDiffMock(gitStatus, "")
+	mb := newDiffMemBackend(t, gitStatus, "")
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -239,7 +185,7 @@ func TestDiffCommand_HumanOutput_NoCIChanges(t *testing.T) {
 // --- Unit tests: JSON output ---
 
 func TestDiffCommand_JSONOutput_NoChanges(t *testing.T) {
-	mb := newDiffMock("", "")
+	mb := newDiffMemBackend(t, "", "")
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -273,7 +219,7 @@ func TestDiffCommand_JSONOutput_NoChanges(t *testing.T) {
 
 func TestDiffCommand_JSONOutput_WithCIChanges(t *testing.T) {
 	gitStatus := "M .github/workflows/ci.yml\n?? Jenkinsfile"
-	mb := newDiffMock(gitStatus, "")
+	mb := newDiffMemBackend(t, gitStatus, "")
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -313,7 +259,7 @@ func TestDiffCommand_JSONOutput_WithCIChanges(t *testing.T) {
 
 func TestDiffCommand_JSONOutput_MixedChanges(t *testing.T) {
 	gitStatus := "M .github/workflows/test.yml\nM src/app.go\nD README.md"
-	mb := newDiffMock(gitStatus, "")
+	mb := newDiffMemBackend(t, gitStatus, "")
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -347,11 +293,7 @@ func TestDiffCommand_JSONOutput_MixedChanges(t *testing.T) {
 // --- Unit tests: Error handling ---
 
 func TestDiffCommand_VMNotFound(t *testing.T) {
-	mb := &mockDiffBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{},
-	}
+	mb := memory.New()
 	setupDiffTest(t, mb)
 
 	root := RootCmd()
@@ -365,11 +307,9 @@ func TestDiffCommand_VMNotFound(t *testing.T) {
 }
 
 func TestDiffCommand_VMNotRunning(t *testing.T) {
-	mb := &mockDiffBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"stopped-vm": backend.StatusStopped},
-	}
+	mb := memory.New()
+	require.NoError(t, mb.Create(context.Background(), "stopped-vm", backend.VMConfig{}))
+	require.NoError(t, mb.Stop(context.Background(), "stopped-vm"))
 	setupDiffTest(t, mb)
 
 	root := RootCmd()
@@ -401,7 +341,8 @@ func TestDiffCommand_BackendUnavailable(t *testing.T) {
 }
 
 func TestDiffCommand_BackendNotAvailable(t *testing.T) {
-	mb := &mockDiffBackend{name: "mock", available: false}
+	mb := memory.New()
+	mb.SetMethodError("available", fmt.Errorf("backend not available"))
 	setupDiffTest(t, mb)
 
 	root := RootCmd()
@@ -415,12 +356,11 @@ func TestDiffCommand_BackendNotAvailable(t *testing.T) {
 }
 
 func TestDiffCommand_ExecError(t *testing.T) {
-	mb := &mockDiffBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"test-vm": backend.StatusRunning},
-		execErr:   fmt.Errorf("ssh connection refused"),
-	}
+	mb := memory.New()
+	require.NoError(t, mb.Create(context.Background(), "test-vm", backend.VMConfig{}))
+	mb.SetExecHandler(func(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
+		return backend.ExecResult{}, fmt.Errorf("ssh connection refused")
+	})
 	setupDiffTest(t, mb)
 
 	root := RootCmd()
@@ -434,12 +374,11 @@ func TestDiffCommand_ExecError(t *testing.T) {
 }
 
 func TestDiffCommand_ExecErrVMNotRunning(t *testing.T) {
-	mb := &mockDiffBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"test-vm": backend.StatusRunning},
-		execErr:   backend.ErrVMNotRunning,
-	}
+	mb := memory.New()
+	require.NoError(t, mb.Create(context.Background(), "test-vm", backend.VMConfig{}))
+	mb.SetExecHandler(func(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
+		return backend.ExecResult{}, backend.ErrVMNotRunning
+	})
 	setupDiffTest(t, mb)
 
 	root := RootCmd()
@@ -453,7 +392,7 @@ func TestDiffCommand_ExecErrVMNotRunning(t *testing.T) {
 }
 
 func TestDiffCommand_EmptyName(t *testing.T) {
-	mb := &mockDiffBackend{name: "mock", available: true}
+	mb := memory.New()
 	setupDiffTest(t, mb)
 
 	root := RootCmd()
@@ -467,12 +406,8 @@ func TestDiffCommand_EmptyName(t *testing.T) {
 }
 
 func TestDiffCommand_StatusCheckError(t *testing.T) {
-	mb := &mockDiffBackend{
-		name:      "mock",
-		available: true,
-		statusErr: fmt.Errorf("connection refused"),
-		statusMap: map[string]backend.VMStatus{},
-	}
+	mb := memory.New()
+	mb.SetMethodError("status", fmt.Errorf("connection refused"))
 	setupDiffTest(t, mb)
 
 	root := RootCmd()
@@ -490,7 +425,7 @@ func TestDiffCommand_StatusCheckError(t *testing.T) {
 func TestDiffCommand_HooksDetection(t *testing.T) {
 	gitStatus := "M src/main.go"
 	hooksOutput := "pre-commit\ncommit-msg\napplypatch-msg.sample"
-	mb := newDiffMock(gitStatus, hooksOutput)
+	mb := newDiffMemBackend(t, gitStatus, hooksOutput)
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -540,7 +475,7 @@ func TestDiffCommand_HooksNotDuplicated(t *testing.T) {
 	// If a hook already appears in git status, it shouldn't be added again
 	gitStatus := "M .git/hooks/pre-commit\nM src/main.go"
 	hooksOutput := "pre-commit"
-	mb := newDiffMock(gitStatus, hooksOutput)
+	mb := newDiffMemBackend(t, gitStatus, hooksOutput)
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -718,8 +653,18 @@ func TestProperty_DiffJSONAlwaysValid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mb := newDiffMock(tc.gitStatus, tc.hooks)
-			mb.statusMap[tc.vmName] = backend.StatusRunning
+			mb := memory.New()
+			require.NoError(t, mb.Create(context.Background(), tc.vmName, backend.VMConfig{}))
+			mb.SetExecHandler(func(_ context.Context, _ string, command []string) (backend.ExecResult, error) {
+				cmdStr := strings.Join(command, " ")
+				if strings.Contains(cmdStr, "git status --porcelain") {
+					return backend.ExecResult{ExitCode: 0, Stdout: "true\n" + tc.gitStatus}, nil
+				}
+				if strings.Contains(cmdStr, "git rev-parse --git-dir") {
+					return backend.ExecResult{ExitCode: 0, Stdout: ".git\n" + tc.hooks}, nil
+				}
+				return backend.ExecResult{ExitCode: 0, Stdout: ""}, nil
+			})
 			setupDiffTest(t, mb)
 
 			oldStdout := os.Stdout
@@ -762,7 +707,7 @@ func TestProperty_DiffErrorCodesSnakeCase(t *testing.T) {
 			"vm_not_found",
 			[]string{"diff", "missing"},
 			func(t *testing.T) {
-				mb := &mockDiffBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+				mb := memory.New()
 				setupDiffTest(t, mb)
 			},
 			"vm_not_found",
@@ -771,7 +716,9 @@ func TestProperty_DiffErrorCodesSnakeCase(t *testing.T) {
 			"vm_not_running",
 			[]string{"diff", "stopped"},
 			func(t *testing.T) {
-				mb := &mockDiffBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{"stopped": backend.StatusStopped}}
+				mb := memory.New()
+				require.NoError(t, mb.Create(context.Background(), "stopped", backend.VMConfig{}))
+				require.NoError(t, mb.Stop(context.Background(), "stopped"))
 				setupDiffTest(t, mb)
 			},
 			"vm_not_running",
@@ -780,7 +727,7 @@ func TestProperty_DiffErrorCodesSnakeCase(t *testing.T) {
 			"invalid_argument",
 			[]string{"diff", ""},
 			func(t *testing.T) {
-				mb := &mockDiffBackend{name: "mock", available: true}
+				mb := memory.New()
 				setupDiffTest(t, mb)
 			},
 			"invalid_argument",
@@ -789,7 +736,8 @@ func TestProperty_DiffErrorCodesSnakeCase(t *testing.T) {
 			"backend_unavailable",
 			[]string{"diff", "vm1"},
 			func(t *testing.T) {
-				mb := &mockDiffBackend{name: "mock", available: false}
+				mb := memory.New()
+				mb.SetMethodError("available", fmt.Errorf("backend not available"))
 				setupDiffTest(t, mb)
 			},
 			"backend_unavailable",
@@ -798,7 +746,8 @@ func TestProperty_DiffErrorCodesSnakeCase(t *testing.T) {
 			"diff_failed_on_status_err",
 			[]string{"diff", "vm1"},
 			func(t *testing.T) {
-				mb := &mockDiffBackend{name: "mock", available: true, statusErr: fmt.Errorf("fail")}
+				mb := memory.New()
+				mb.SetMethodError("status", fmt.Errorf("fail"))
 				setupDiffTest(t, mb)
 			},
 			"diff_failed",
@@ -807,7 +756,11 @@ func TestProperty_DiffErrorCodesSnakeCase(t *testing.T) {
 			"diff_failed_on_exec_err",
 			[]string{"diff", "vm1"},
 			func(t *testing.T) {
-				mb := &mockDiffBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{"vm1": backend.StatusRunning}, execErr: fmt.Errorf("fail")}
+				mb := memory.New()
+				require.NoError(t, mb.Create(context.Background(), "vm1", backend.VMConfig{}))
+				mb.SetExecHandler(func(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
+					return backend.ExecResult{}, fmt.Errorf("fail")
+				})
 				setupDiffTest(t, mb)
 			},
 			"diff_failed",
@@ -836,15 +789,18 @@ func TestProperty_DiffHumanContainsVMName(t *testing.T) {
 	vmNames := []string{"my-vm", "prod-server", "dev-box", "test", "vm-with-long-name"}
 	for _, vmName := range vmNames {
 		t.Run(vmName, func(t *testing.T) {
-			mb := &mockDiffBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{vmName: backend.StatusRunning},
-				execResponses: map[string]backend.ExecResult{
-					"git status": {ExitCode: 0, Stdout: "true\n"},
-					"git rev-parse": {ExitCode: 0, Stdout: ""},
-				},
-			}
+			mb := memory.New()
+			require.NoError(t, mb.Create(context.Background(), vmName, backend.VMConfig{}))
+			mb.SetExecHandler(func(_ context.Context, _ string, command []string) (backend.ExecResult, error) {
+				cmdStr := strings.Join(command, " ")
+				if strings.Contains(cmdStr, "git status") {
+					return backend.ExecResult{ExitCode: 0, Stdout: "true\n"}, nil
+				}
+				if strings.Contains(cmdStr, "git rev-parse") {
+					return backend.ExecResult{ExitCode: 0, Stdout: ""}, nil
+				}
+				return backend.ExecResult{ExitCode: 0}, nil
+			})
 			setupDiffTest(t, mb)
 
 			oldStdout := os.Stdout
@@ -871,11 +827,12 @@ func TestProperty_DiffNonexistentVMNeverCallsExec(t *testing.T) {
 	vmNames := []string{"ghost", "phantom", "missing"}
 	for _, vmName := range vmNames {
 		t.Run(vmName, func(t *testing.T) {
-			mb := &mockDiffBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{},
-			}
+			mb := memory.New()
+			execCalled := false
+			mb.SetExecHandler(func(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
+				execCalled = true
+				return backend.ExecResult{}, nil
+			})
 			setupDiffTest(t, mb)
 
 			root := RootCmd()
@@ -883,14 +840,14 @@ func TestProperty_DiffNonexistentVMNeverCallsExec(t *testing.T) {
 			err := root.Execute()
 
 			require.Error(t, err)
-			assert.Empty(t, mb.diffExecCalls, "exec should never be called for nonexistent VM")
+			assert.False(t, execCalled, "exec should never be called for nonexistent VM")
 		})
 	}
 }
 
 func TestProperty_DiffJSONRequiredFields(t *testing.T) {
 	gitStatus := "M .github/workflows/test.yml\nA src/main.go"
-	mb := newDiffMock(gitStatus, "pre-commit")
+	mb := newDiffMemBackend(t, gitStatus, "pre-commit")
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -931,11 +888,14 @@ func TestProperty_DiffStoppedVMNeverCallsExec(t *testing.T) {
 	statuses := []backend.VMStatus{backend.StatusStopped, backend.StatusError, backend.StatusCreating}
 	for _, status := range statuses {
 		t.Run(string(status), func(t *testing.T) {
-			mb := &mockDiffBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{"vm1": status},
-			}
+			mb := memory.New()
+			require.NoError(t, mb.Create(context.Background(), "vm1", backend.VMConfig{}))
+			require.NoError(t, mb.SetStatus("vm1", status))
+			execCalled := false
+			mb.SetExecHandler(func(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
+				execCalled = true
+				return backend.ExecResult{}, nil
+			})
 			setupDiffTest(t, mb)
 
 			root := RootCmd()
@@ -943,7 +903,7 @@ func TestProperty_DiffStoppedVMNeverCallsExec(t *testing.T) {
 			err := root.Execute()
 
 			require.Error(t, err)
-			assert.Empty(t, mb.diffExecCalls, "exec should not be called for non-running VM")
+			assert.False(t, execCalled, "exec should not be called for non-running VM")
 		})
 	}
 }
@@ -976,7 +936,7 @@ func TestProperty_DiffCICDWarningAlwaysHasCategory(t *testing.T) {
 		}
 	}
 	gitStatus := strings.Join(statusLines, "\n")
-	mb := newDiffMock(gitStatus, "")
+	mb := newDiffMemBackend(t, gitStatus, "")
 	setupDiffTest(t, mb)
 
 	oldStdout := os.Stdout
@@ -1024,7 +984,7 @@ func TestProperty_DiffErrorCodesConsistent(t *testing.T) {
 					name = "json"
 				}
 				t.Run(name, func(t *testing.T) {
-					mb := &mockDiffBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
+					mb := memory.New()
 					setupDiffTest(t, mb)
 
 					args := []string{"diff", vmName}

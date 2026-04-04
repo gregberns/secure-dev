@@ -1,6 +1,7 @@
 // Package cmd provides tests for the exec command.
 // REQ-007-013: Exec Command
 // REQ-007-014: Exec JSON Output
+// NOTE: Tests use global getBackendFunc — do not use t.Parallel().
 package cmd
 
 import (
@@ -14,74 +15,48 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/backend/memory"
 	"sd/internal/ui"
 )
 
-// mockExecBackend is a digital twin of a backend for exec command testing.
-// It implements backend.Backend with configurable Exec behavior and records calls.
-type mockExecBackend struct {
-	name      string
-	available bool
-	// Records all Exec calls: (vmName, command)
-	execCalls []execCall
-	// Configurable results
-	execResult backend.ExecResult
-	execErr    error
-	statusErr  error
-	statusMap  map[string]backend.VMStatus
-}
-
+// execCall records the arguments of an Exec invocation.
 type execCall struct {
 	VMName  string
 	Command []string
 }
 
-func (m *mockExecBackend) Name() string { return m.name }
-func (m *mockExecBackend) Available() error {
-	if m.available {
-		return nil
-	}
-	return fmt.Errorf("backend not available")
-}
-func (m *mockExecBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
-	return nil
-}
-func (m *mockExecBackend) Start(_ context.Context, _ string) error    { return nil }
-func (m *mockExecBackend) Stop(_ context.Context, _ string) error     { return nil }
-func (m *mockExecBackend) Destroy(_ context.Context, _ string) error  { return nil }
-func (m *mockExecBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (m *mockExecBackend) List(_ context.Context) ([]backend.VMInfo, error) {
-	return nil, nil
-}
-func (m *mockExecBackend) Exec(_ context.Context, name string, command []string) (backend.ExecResult, error) {
-	if m.execErr != nil {
-		return backend.ExecResult{}, m.execErr
-	}
-	m.execCalls = append(m.execCalls, execCall{VMName: name, Command: command})
-	return m.execResult, nil
-}
-func (m *mockExecBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
-	if m.statusErr != nil {
-		return "", m.statusErr
-	}
-	if s, ok := m.statusMap[name]; ok {
-		return s, nil
-	}
-	return "", backend.ErrVMNotFound
-}
-
-// setupExecTest configures the test environment with a mock backend.
-func setupExecTest(t *testing.T, mb *mockExecBackend) {
+// setupExecMemoryTest creates a memory backend, registers VMs with given statuses,
+// and injects it into getBackendFunc. Returns the backend and a pointer to a slice
+// of execCalls for tracking invocations.
+func setupExecMemoryTest(t *testing.T, statusMap map[string]backend.VMStatus, result backend.ExecResult, execErr error) (*memory.Backend, *[]execCall) {
 	t.Helper()
 	newRootTestEnv(t)
 
+	mb := memory.New()
+	for name, status := range statusMap {
+		require.NoError(t, mb.Create(context.Background(), name, backend.VMConfig{}))
+		if status != backend.StatusRunning {
+			require.NoError(t, mb.SetStatus(name, status))
+		}
+	}
+
+	calls := &[]execCall{}
+	if execErr != nil {
+		mb.SetMethodError("exec", execErr)
+	} else {
+		mb.SetExecHandler(func(ctx context.Context, name string, command []string) (backend.ExecResult, error) {
+			*calls = append(*calls, execCall{VMName: name, Command: command})
+			return result, nil
+		})
+	}
+
 	origGetBackend := getBackendFunc
-	getBackendFunc = func(name string) (backend.Backend, error) {
+	getBackendFunc = func(_ string) (backend.Backend, error) {
 		return mb, nil
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend })
+	t.Cleanup(func() { getBackendFunc = origGetBackend; mb.Reset() })
+
+	return mb, calls
 }
 
 // --- Unit tests ---
@@ -123,17 +98,11 @@ func TestExecCommand_MinArgs(t *testing.T) {
 }
 
 func TestExecCommand_BasicExec_HumanOutput(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execResult: backend.ExecResult{
-			ExitCode: 0,
-			Stdout:   "hello world\n",
-			Stderr:   "",
-		},
-	}
-	setupExecTest(t, mb)
+	_, calls := setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0, Stdout: "hello world\n", Stderr: ""},
+		nil,
+	)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -154,23 +123,17 @@ func TestExecCommand_BasicExec_HumanOutput(t *testing.T) {
 	assert.Equal(t, "hello world\n", buf.String())
 
 	// Verify backend was called with correct args
-	require.Len(t, mb.execCalls, 1)
-	assert.Equal(t, "myvm", mb.execCalls[0].VMName)
-	assert.Equal(t, []string{"echo", "hello", "world"}, mb.execCalls[0].Command)
+	require.Len(t, *calls, 1)
+	assert.Equal(t, "myvm", (*calls)[0].VMName)
+	assert.Equal(t, []string{"echo", "hello", "world"}, (*calls)[0].Command)
 }
 
 func TestExecCommand_BasicExec_JSONOutput(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execResult: backend.ExecResult{
-			ExitCode: 0,
-			Stdout:   "hello\n",
-			Stderr:   "",
-		},
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0, Stdout: "hello\n", Stderr: ""},
+		nil,
+	)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -201,17 +164,11 @@ func TestExecCommand_BasicExec_JSONOutput(t *testing.T) {
 }
 
 func TestExecCommand_NonZeroExitCode_JSONOutput(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execResult: backend.ExecResult{
-			ExitCode: 42,
-			Stdout:   "",
-			Stderr:   "error: something failed\n",
-		},
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 42, Stdout: "", Stderr: "error: something failed\n"},
+		nil,
+	)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -247,12 +204,7 @@ func TestExecCommand_NonZeroExitCode_JSONOutput(t *testing.T) {
 }
 
 func TestExecCommand_VMNotFound(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{},
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t, map[string]backend.VMStatus{}, backend.ExecResult{}, nil)
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "nonexistent", "--", "echo"})
@@ -266,12 +218,10 @@ func TestExecCommand_VMNotFound(t *testing.T) {
 }
 
 func TestExecCommand_VMNotRunning(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusStopped},
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusStopped},
+		backend.ExecResult{}, nil,
+	)
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "myvm", "--", "echo"})
@@ -286,12 +236,10 @@ func TestExecCommand_VMNotRunning(t *testing.T) {
 }
 
 func TestExecCommand_VMInErrorStatus(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusError},
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusError},
+		backend.ExecResult{}, nil,
+	)
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "myvm", "--", "echo"})
@@ -304,8 +252,8 @@ func TestExecCommand_VMInErrorStatus(t *testing.T) {
 }
 
 func TestExecCommand_BackendUnavailable(t *testing.T) {
-	mb := &mockExecBackend{name: "mock", available: false}
-	setupExecTest(t, mb)
+	mb, _ := setupExecMemoryTest(t, map[string]backend.VMStatus{}, backend.ExecResult{}, nil)
+	mb.SetMethodError("available", fmt.Errorf("backend not available"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "myvm", "--", "echo"})
@@ -337,13 +285,11 @@ func TestExecCommand_BackendGetError(t *testing.T) {
 }
 
 func TestExecCommand_ExecBackendError(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execErr:   fmt.Errorf("internal error"),
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{},
+		fmt.Errorf("internal error"),
+	)
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "myvm", "--", "echo"})
@@ -357,13 +303,11 @@ func TestExecCommand_ExecBackendError(t *testing.T) {
 }
 
 func TestExecCommand_ExecBackendErrVMNotRunning(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execErr:   backend.ErrVMNotRunning,
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{},
+		backend.ErrVMNotRunning,
+	)
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "myvm", "--", "echo"})
@@ -376,13 +320,11 @@ func TestExecCommand_ExecBackendErrVMNotRunning(t *testing.T) {
 }
 
 func TestExecCommand_ExecBackendErrVMNotFound(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execErr:   backend.ErrVMNotFound,
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{},
+		backend.ErrVMNotFound,
+	)
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "myvm", "--", "echo"})
@@ -395,8 +337,7 @@ func TestExecCommand_ExecBackendErrVMNotFound(t *testing.T) {
 }
 
 func TestExecCommand_EmptyName(t *testing.T) {
-	mb := &mockExecBackend{name: "mock", available: true}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t, map[string]backend.VMStatus{}, backend.ExecResult{}, nil)
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "", "echo"})
@@ -409,13 +350,8 @@ func TestExecCommand_EmptyName(t *testing.T) {
 }
 
 func TestExecCommand_StatusCheckError(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusErr: fmt.Errorf("connection refused"),
-		statusMap: map[string]backend.VMStatus{},
-	}
-	setupExecTest(t, mb)
+	mb, _ := setupExecMemoryTest(t, map[string]backend.VMStatus{}, backend.ExecResult{}, nil)
+	mb.SetMethodError("status", fmt.Errorf("connection refused"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "myvm", "--", "echo"})
@@ -429,17 +365,11 @@ func TestExecCommand_StatusCheckError(t *testing.T) {
 }
 
 func TestExecCommand_StderrPassedThrough(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execResult: backend.ExecResult{
-			ExitCode: 0,
-			Stdout:   "out\n",
-			Stderr:   "warning message\n",
-		},
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0, Stdout: "out\n", Stderr: "warning message\n"},
+		nil,
+	)
 
 	oldStdout := os.Stdout
 	outR, outW, err := os.Pipe()
@@ -470,21 +400,19 @@ func TestExecCommand_StderrPassedThrough(t *testing.T) {
 }
 
 func TestExecCommand_CommandWithArgs(t *testing.T) {
-	mb := &mockExecBackend{
-		name:       "mock",
-		available:  true,
-		statusMap:  map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execResult: backend.ExecResult{ExitCode: 0},
-	}
-	setupExecTest(t, mb)
+	_, calls := setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0},
+		nil,
+	)
 
 	root := RootCmd()
 	root.SetArgs([]string{"--json", "exec", "myvm", "--", "ls", "-la", "/tmp"})
 	err := root.Execute()
 
 	require.NoError(t, err)
-	require.Len(t, mb.execCalls, 1)
-	assert.Equal(t, []string{"ls", "-la", "/tmp"}, mb.execCalls[0].Command)
+	require.Len(t, *calls, 1)
+	assert.Equal(t, []string{"ls", "-la", "/tmp"}, (*calls)[0].Command)
 }
 
 func TestExecCommand_MissingVMName(t *testing.T) {
@@ -524,17 +452,11 @@ func TestProperty_ExecJSONAlwaysValid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mb := &mockExecBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{tc.vmName: backend.StatusRunning},
-				execResult: backend.ExecResult{
-					ExitCode: tc.exitCode,
-					Stdout:   tc.stdout,
-					Stderr:   tc.stderr,
-				},
-			}
-			setupExecTest(t, mb)
+			setupExecMemoryTest(t,
+				map[string]backend.VMStatus{tc.vmName: backend.StatusRunning},
+				backend.ExecResult{ExitCode: tc.exitCode, Stdout: tc.stdout, Stderr: tc.stderr},
+				nil,
+			)
 
 			// Capture os.Exit for non-zero exit codes
 			oldOsExit := osExit
@@ -576,16 +498,11 @@ func TestProperty_ExecHumanOutputContainsStdout(t *testing.T) {
 	outputs := []string{"hello\n", "multi\nline\n", "", "x", "long output with spaces and things\n"}
 	for _, output := range outputs {
 		t.Run(fmt.Sprintf("output_%q", output), func(t *testing.T) {
-			mb := &mockExecBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{"vm1": backend.StatusRunning},
-				execResult: backend.ExecResult{
-					ExitCode: 0,
-					Stdout:   output,
-				},
-			}
-			setupExecTest(t, mb)
+			setupExecMemoryTest(t,
+				map[string]backend.VMStatus{"vm1": backend.StatusRunning},
+				backend.ExecResult{ExitCode: 0, Stdout: output},
+				nil,
+			)
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -611,12 +528,7 @@ func TestProperty_ExecHumanOutputContainsStdout(t *testing.T) {
 // Property: error codes are always snake_case.
 func TestProperty_ExecErrorCodesSnakeCase(t *testing.T) {
 	t.Run("vm_not_found", func(t *testing.T) {
-		mb := &mockExecBackend{
-			name:      "mock",
-			available: true,
-			statusMap: map[string]backend.VMStatus{},
-		}
-		setupExecTest(t, mb)
+		setupExecMemoryTest(t, map[string]backend.VMStatus{}, backend.ExecResult{}, nil)
 
 		root := RootCmd()
 		root.SetArgs([]string{"exec", "ghost", "--", "cmd"})
@@ -627,12 +539,10 @@ func TestProperty_ExecErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("vm_not_running", func(t *testing.T) {
-		mb := &mockExecBackend{
-			name:      "mock",
-			available: true,
-			statusMap: map[string]backend.VMStatus{"vm1": backend.StatusStopped},
-		}
-		setupExecTest(t, mb)
+		setupExecMemoryTest(t,
+			map[string]backend.VMStatus{"vm1": backend.StatusStopped},
+			backend.ExecResult{}, nil,
+		)
 
 		root := RootCmd()
 		root.SetArgs([]string{"exec", "vm1", "--", "cmd"})
@@ -643,8 +553,8 @@ func TestProperty_ExecErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("backend_unavailable", func(t *testing.T) {
-		mb := &mockExecBackend{name: "mock", available: false}
-		setupExecTest(t, mb)
+		mb, _ := setupExecMemoryTest(t, map[string]backend.VMStatus{}, backend.ExecResult{}, nil)
+		mb.SetMethodError("available", fmt.Errorf("backend not available"))
 
 		root := RootCmd()
 		root.SetArgs([]string{"exec", "vm1", "--", "cmd"})
@@ -655,8 +565,7 @@ func TestProperty_ExecErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("invalid_argument_empty_name", func(t *testing.T) {
-		mb := &mockExecBackend{name: "mock", available: true}
-		setupExecTest(t, mb)
+		setupExecMemoryTest(t, map[string]backend.VMStatus{}, backend.ExecResult{}, nil)
 
 		root := RootCmd()
 		root.SetArgs([]string{"exec", "", "cmd"})
@@ -667,13 +576,11 @@ func TestProperty_ExecErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("exec_failed", func(t *testing.T) {
-		mb := &mockExecBackend{
-			name:      "mock",
-			available: true,
-			statusMap: map[string]backend.VMStatus{"vm1": backend.StatusRunning},
-			execErr:   fmt.Errorf("internal error"),
-		}
-		setupExecTest(t, mb)
+		setupExecMemoryTest(t,
+			map[string]backend.VMStatus{"vm1": backend.StatusRunning},
+			backend.ExecResult{},
+			fmt.Errorf("internal error"),
+		)
 
 		root := RootCmd()
 		root.SetArgs([]string{"exec", "vm1", "--", "cmd"})
@@ -689,20 +596,18 @@ func TestProperty_ExecRunningVM_CallsBackendOnce(t *testing.T) {
 	names := []string{"vm1", "vm2", "test-vm"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockExecBackend{
-				name:       "mock",
-				available:  true,
-				statusMap:  map[string]backend.VMStatus{name: backend.StatusRunning},
-				execResult: backend.ExecResult{ExitCode: 0},
-			}
-			setupExecTest(t, mb)
+			_, calls := setupExecMemoryTest(t,
+				map[string]backend.VMStatus{name: backend.StatusRunning},
+				backend.ExecResult{ExitCode: 0},
+				nil,
+			)
 
 			root := RootCmd()
 			root.SetArgs([]string{"--json", "exec", name, "--", "echo"})
 			err := root.Execute()
 			require.NoError(t, err)
-			require.Len(t, mb.execCalls, 1, "exec must call backend exactly once for %q", name)
-			assert.Equal(t, name, mb.execCalls[0].VMName)
+			require.Len(t, *calls, 1, "exec must call backend exactly once for %q", name)
+			assert.Equal(t, name, (*calls)[0].VMName)
 		})
 	}
 }
@@ -712,35 +617,27 @@ func TestProperty_ExecStoppedVM_NeverCallsBackend(t *testing.T) {
 	statuses := []backend.VMStatus{backend.StatusStopped, backend.StatusCreating, backend.StatusError}
 	for _, status := range statuses {
 		t.Run(string(status), func(t *testing.T) {
-			mb := &mockExecBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{"vm1": status},
-			}
-			setupExecTest(t, mb)
+			_, calls := setupExecMemoryTest(t,
+				map[string]backend.VMStatus{"vm1": status},
+				backend.ExecResult{}, nil,
+			)
 
 			root := RootCmd()
 			root.SetArgs([]string{"exec", "vm1", "--", "echo"})
 			err := root.Execute()
 			require.Error(t, err)
-			assert.Empty(t, mb.execCalls, "exec on non-running VM must not call backend.Exec for status %s", status)
+			assert.Empty(t, *calls, "exec on non-running VM must not call backend.Exec for status %s", status)
 		})
 	}
 }
 
 // Property: JSON output always contains required fields.
 func TestProperty_ExecJSONRequiredFields(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-		execResult: backend.ExecResult{
-			ExitCode: 0,
-			Stdout:   "test",
-			Stderr:   "",
-		},
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0, Stdout: "test", Stderr: ""},
+		nil,
+	)
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -774,12 +671,7 @@ func TestProperty_ExecJSONRequiredFields(t *testing.T) {
 
 // Property: error JSON format is consistent for vm_not_found.
 func TestProperty_ExecErrorJSONFormat(t *testing.T) {
-	mb := &mockExecBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{},
-	}
-	setupExecTest(t, mb)
+	setupExecMemoryTest(t, map[string]backend.VMStatus{}, backend.ExecResult{}, nil)
 
 	root := RootCmd()
 	root.SetArgs([]string{"exec", "nonexistent", "--", "cmd"})

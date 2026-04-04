@@ -1,5 +1,7 @@
 // Package cmd provides tests for the security status command.
 // REQ-004-024: Security Posture Summary
+//
+// NOTE: Tests use global getBackendFunc — do not use t.Parallel().
 package cmd
 
 import (
@@ -16,90 +18,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/backend/memory"
 	"sd/internal/config"
 	"sd/internal/security"
 	"sd/internal/ui"
 )
 
 // ---------------------------------------------------------------------------
-// Digital Twins
+// Digital Twins (minimal — only for non-Snapshotter testing)
 // ---------------------------------------------------------------------------
-
-// mockSecurityBackend is a digital twin of a backend for security status tests.
-// It implements backend.Backend and backend.Snapshotter.
-type mockSecurityBackend struct {
-	name        string
-	available   bool
-	vmStatus    map[string]backend.VMStatus
-	statusErr   error
-	snapshots   map[string][]backend.SnapshotInfo
-	snapshotErr error
-}
-
-func newMockSecurityBackend() *mockSecurityBackend {
-	return &mockSecurityBackend{
-		name:      "mock-security",
-		available: true,
-		vmStatus: map[string]backend.VMStatus{
-			"test-vm": backend.StatusRunning,
-		},
-		snapshots: make(map[string][]backend.SnapshotInfo),
-	}
-}
-
-func (m *mockSecurityBackend) Name() string                                       { return m.name }
-func (m *mockSecurityBackend) Available() error                                    { return nil }
-func (m *mockSecurityBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error { return nil }
-func (m *mockSecurityBackend) Start(_ context.Context, _ string) error             { return nil }
-func (m *mockSecurityBackend) Stop(_ context.Context, _ string) error              { return nil }
-func (m *mockSecurityBackend) Destroy(_ context.Context, _ string) error           { return nil }
-func (m *mockSecurityBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (m *mockSecurityBackend) Exec(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
-	return backend.ExecResult{}, nil
-}
-func (m *mockSecurityBackend) List(_ context.Context) ([]backend.VMInfo, error) { return nil, nil }
-func (m *mockSecurityBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
-	if m.statusErr != nil {
-		return "", m.statusErr
-	}
-	if s, ok := m.vmStatus[name]; ok {
-		return s, nil
-	}
-	return "", backend.ErrVMNotFound
-}
-
-// Snapshotter implementation
-func (m *mockSecurityBackend) SnapshotCreate(_ context.Context, _, _ string) error { return nil }
-func (m *mockSecurityBackend) SnapshotApply(_ context.Context, _, _ string) error  { return nil }
-func (m *mockSecurityBackend) SnapshotDelete(_ context.Context, _, _ string) error { return nil }
-func (m *mockSecurityBackend) SnapshotList(_ context.Context, name string) ([]backend.SnapshotInfo, error) {
-	if m.snapshotErr != nil {
-		return nil, m.snapshotErr
-	}
-	return m.snapshots[name], nil
-}
-
-// noSnapshotterMinimal is a minimal backend without Snapshotter.
-type noSnapshotterMinimal struct{}
-
-func (n *noSnapshotterMinimal) Name() string                                       { return "no-snap" }
-func (n *noSnapshotterMinimal) Available() error                                    { return nil }
-func (n *noSnapshotterMinimal) Create(_ context.Context, _ string, _ backend.VMConfig) error { return nil }
-func (n *noSnapshotterMinimal) Start(_ context.Context, _ string) error             { return nil }
-func (n *noSnapshotterMinimal) Stop(_ context.Context, _ string) error              { return nil }
-func (n *noSnapshotterMinimal) Destroy(_ context.Context, _ string) error           { return nil }
-func (n *noSnapshotterMinimal) Status(_ context.Context, _ string) (backend.VMStatus, error) {
-	return backend.StatusRunning, nil
-}
-func (n *noSnapshotterMinimal) List(_ context.Context) ([]backend.VMInfo, error)    { return nil, nil }
-func (n *noSnapshotterMinimal) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (n *noSnapshotterMinimal) Exec(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
-	return backend.ExecResult{}, nil
-}
 
 // mockSecurityEnvStore is a digital twin for VM credential storage in security tests.
 // It preserves key case (unlike viper which lowercases).
@@ -128,11 +55,15 @@ func (m *mockSecurityEnvStore) read(_, vmName string) (map[string]string, error)
 // ---------------------------------------------------------------------------
 
 // setupSecurityTest configures the test environment for security status tests.
-func setupSecurityTest(t *testing.T) (*mockSecurityBackend, *mockSecurityEnvStore, func()) {
+// Returns the memory backend, env store, and a cleanup function.
+func setupSecurityTest(t *testing.T) (*memory.Backend, *mockSecurityEnvStore, func()) {
 	t.Helper()
 	tmpDir := newRootTestEnv(t)
 
-	mb := newMockSecurityBackend()
+	mb := memory.New()
+	// Create a default "test-vm" in Running state
+	require.NoError(t, mb.Create(context.Background(), "test-vm", backend.VMConfig{}))
+
 	envStore := newMockSecurityEnvStore()
 
 	origGetBackend := getBackendFunc
@@ -197,9 +128,7 @@ func TestSecurityStatus_HumanOutput(t *testing.T) {
 	defer cleanup()
 
 	sdHome := loader.SDHome()
-	mb.snapshots["test-vm"] = []backend.SnapshotInfo{
-		{Name: "snap1", CreatedAt: time.Now().UTC(), Size: 1024},
-	}
+	require.NoError(t, mb.SnapshotCreate(context.Background(), "test-vm", "snap1"))
 	envStore.envs["test-vm"] = map[string]string{
 		"GITHUB_TOKEN":      "github_pat_abc123",
 		"ANTHROPIC_API_KEY": "sk-ant-test123",
@@ -220,6 +149,7 @@ func TestSecurityStatus_HumanOutput(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(false, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"test-vm"})
 	require.NoError(t, err)
 
@@ -238,9 +168,7 @@ func TestSecurityStatus_JSONOutput(t *testing.T) {
 	mb, envStore, cleanup := setupSecurityTest(t)
 	defer cleanup()
 
-	mb.snapshots["test-vm"] = []backend.SnapshotInfo{
-		{Name: "snap1", CreatedAt: time.Now().UTC(), Size: 2048},
-	}
+	require.NoError(t, mb.SnapshotCreate(context.Background(), "test-vm", "snap1"))
 	envStore.envs["test-vm"] = map[string]string{
 		"GITHUB_TOKEN":      "github_pat_abc123",
 		"ANTHROPIC_API_KEY": "sk-ant-test123",
@@ -250,6 +178,7 @@ func TestSecurityStatus_JSONOutput(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(true, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"test-vm"})
 	require.NoError(t, err)
 
@@ -287,6 +216,7 @@ func TestSecurityStatus_VMNotFound(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(false, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"nonexistent-vm"})
 
 	require.Error(t, err)
@@ -307,6 +237,7 @@ func TestSecurityStatus_BackendUnavailable(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(false, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"test-vm"})
 
 	require.Error(t, err)
@@ -323,6 +254,7 @@ func TestSecurityStatus_EmptyName(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(false, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{""})
 
 	require.Error(t, err)
@@ -339,6 +271,7 @@ func TestSecurityStatus_NoCredentials_Warning(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(true, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"test-vm"})
 	require.NoError(t, err)
 
@@ -370,6 +303,7 @@ func TestSecurityStatus_ClassicPAT_Warning(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(true, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"test-vm"})
 	require.NoError(t, err)
 
@@ -400,6 +334,7 @@ func TestSecurityStatus_NoSnapshots_Warning(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(true, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"test-vm"})
 	require.NoError(t, err)
 
@@ -491,10 +426,12 @@ func TestSecurityStatus_NoAuditEvents(t *testing.T) {
 }
 
 func TestSecurityStatus_NonSnapshotterBackend(t *testing.T) {
+	// Use mockNoSnapshotterBackend from snapshot_test.go — this tests the code
+	// path where the backend does NOT implement Snapshotter.
 	newRootTestEnv(t)
 	origGetBackend := getBackendFunc
 	getBackendFunc = func(_ string) (backend.Backend, error) {
-		return &noSnapshotterMinimal{}, nil
+		return &mockNoSnapshotterBackend{name: "no-snap", available: true}, nil
 	}
 	defer func() { getBackendFunc = origGetBackend }()
 
@@ -508,6 +445,7 @@ func TestSecurityStatus_NonSnapshotterBackend(t *testing.T) {
 	formatter = ui.NewFormatterWithWriters(true, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"test-vm"})
 	require.NoError(t, err)
 
@@ -629,15 +567,15 @@ func TestProperty_SecurityStatus_JSONAlwaysValid(t *testing.T) {
 			mb, envStore, cleanup := setupSecurityTest(t)
 			defer cleanup()
 
-			mb.vmStatus[tc.vmName] = backend.VMStatus(tc.status)
+			// Create the test VM and set its status
+			require.NoError(t, mb.Create(context.Background(), tc.vmName, backend.VMConfig{}))
+			if tc.status != "running" {
+				require.NoError(t, mb.SetStatus(tc.vmName, backend.VMStatus(tc.status)))
+			}
 			if tc.snapCnt > 0 {
-				snaps := make([]backend.SnapshotInfo, tc.snapCnt)
-				for i := range snaps {
-					snaps[i] = backend.SnapshotInfo{
-						Name: fmt.Sprintf("snap-%d", i), CreatedAt: time.Now().UTC(), Size: 1024 * int64(i+1),
-					}
+				for i := 0; i < tc.snapCnt; i++ {
+					require.NoError(t, mb.SnapshotCreate(context.Background(), tc.vmName, fmt.Sprintf("snap-%d", i)))
 				}
-				mb.snapshots[tc.vmName] = snaps
 			}
 			if tc.env != nil {
 				envStore.envs[tc.vmName] = tc.env
@@ -722,15 +660,14 @@ func TestProperty_SecurityStatus_JSONRequiredFields(t *testing.T) {
 	mb, envStore, cleanup := setupSecurityTest(t)
 	defer cleanup()
 
-	mb.snapshots["test-vm"] = []backend.SnapshotInfo{
-		{Name: "snap1", CreatedAt: time.Now().UTC(), Size: 1024},
-	}
+	require.NoError(t, mb.SnapshotCreate(context.Background(), "test-vm", "snap1"))
 	envStore.envs["test-vm"] = map[string]string{"GITHUB_TOKEN": "github_pat_abc"}
 
 	var stdout, stderr bytes.Buffer
 	formatter = ui.NewFormatterWithWriters(true, &stdout, &stderr)
 
 	cmd, _, _ := rootCmd.Find([]string{"security", "status"})
+	cmd.SetContext(context.Background())
 	err := runSecurityStatus(cmd, []string{"test-vm"})
 	require.NoError(t, err)
 
@@ -756,10 +693,8 @@ func TestProperty_SecurityStatus_HumanContainsVMName(t *testing.T) {
 			mb, envStore, cleanup := setupSecurityTest(t)
 			defer cleanup()
 
-			mb.vmStatus[name] = backend.StatusRunning
-			mb.snapshots[name] = []backend.SnapshotInfo{
-				{Name: "snap1", CreatedAt: time.Now().UTC(), Size: 1024},
-			}
+			require.NoError(t, mb.Create(context.Background(), name, backend.VMConfig{}))
+			require.NoError(t, mb.SnapshotCreate(context.Background(), name, "snap1"))
 			envStore.envs[name] = map[string]string{"GITHUB_TOKEN": "github_pat_abc"}
 
 			var stdout, stderr bytes.Buffer
@@ -800,7 +735,7 @@ func TestProperty_SecurityStatus_WarningsIncludeNoCredentials(t *testing.T) {
 			mb, _, cleanup := setupSecurityTest(t)
 			defer cleanup()
 
-			mb.vmStatus[name] = backend.StatusRunning
+			require.NoError(t, mb.Create(context.Background(), name, backend.VMConfig{}))
 
 			var stdout, stderr bytes.Buffer
 			formatter = ui.NewFormatterWithWriters(true, &stdout, &stderr)

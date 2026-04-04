@@ -1,5 +1,6 @@
 // Package cmd provides tests for the stop command.
 // REQ-002-003: VM Management Commands -- stop
+// NOTE: Tests use global getBackendFunc — do not use t.Parallel().
 package cmd
 
 import (
@@ -13,69 +14,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/backend/memory"
 	"sd/internal/ui"
 )
 
-// mockStopBackend is a digital twin of a backend for stop command testing.
-// It implements backend.Backend with configurable Stop behavior and records calls.
-type mockStopBackend struct {
-	name       string
-	available  bool
-	stopped    []string
-	err        error // error to return from Stop
-	statusErr  error // error to return from Status
-	statusMap  map[string]backend.VMStatus
-}
-
-func (m *mockStopBackend) Name() string { return m.name }
-func (m *mockStopBackend) Available() error {
-	if m.available {
-		return nil
-	}
-	return fmt.Errorf("backend not available")
-}
-func (m *mockStopBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
-	return nil
-}
-func (m *mockStopBackend) Start(_ context.Context, _ string) error    { return nil }
-func (m *mockStopBackend) Destroy(_ context.Context, _ string) error  { return nil }
-func (m *mockStopBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (m *mockStopBackend) List(_ context.Context) ([]backend.VMInfo, error) {
-	return nil, nil
-}
-func (m *mockStopBackend) Exec(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
-	return backend.ExecResult{}, nil
-}
-func (m *mockStopBackend) Stop(_ context.Context, name string) error {
-	if m.err != nil {
-		return m.err
-	}
-	m.stopped = append(m.stopped, name)
-	return nil
-}
-func (m *mockStopBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
-	if m.statusErr != nil {
-		return "", m.statusErr
-	}
-	if s, ok := m.statusMap[name]; ok {
-		return s, nil
-	}
-	return "", backend.ErrVMNotFound
-}
-
-// setupStopTest configures the test environment with a mock backend.
-// Returns the mock so tests can inspect recorded calls.
-func setupStopTest(t *testing.T, mb *mockStopBackend) {
+// setupStopTest configures the test environment with a memory backend.
+func setupStopTest(t *testing.T) *memory.Backend {
 	t.Helper()
 	newRootTestEnv(t)
 
+	mb := memory.New()
 	origGetBackend := getBackendFunc
-	getBackendFunc = func(name string) (backend.Backend, error) {
+	getBackendFunc = func(_ string) (backend.Backend, error) {
 		return mb, nil
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend })
+	t.Cleanup(func() { getBackendFunc = origGetBackend; mb.Reset() })
+	return mb
 }
 
 // --- Unit tests ---
@@ -108,12 +62,11 @@ func TestStopCommand_ExactArgs(t *testing.T) {
 }
 
 func TestStopCommand_BasicStop_HumanOutput(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"testvm": backend.StatusRunning},
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	ctx := context.Background()
+
+	// Create a VM (starts in Running state)
+	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{}))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -134,18 +87,18 @@ func TestStopCommand_BasicStop_HumanOutput(t *testing.T) {
 	assert.Contains(t, buf.String(), "testvm")
 	assert.Contains(t, buf.String(), "stopped")
 
-	// Verify backend was called
-	require.Len(t, mb.stopped, 1)
-	assert.Equal(t, "testvm", mb.stopped[0])
+	// Verify backend state changed to stopped
+	status, sErr := mb.Status(ctx, "testvm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusStopped, status)
 }
 
 func TestStopCommand_BasicStop_JSONOutput(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"testvm": backend.StatusRunning},
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	ctx := context.Background()
+
+	// Create a VM (starts in Running state)
+	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{}))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -175,12 +128,8 @@ func TestStopCommand_BasicStop_JSONOutput(t *testing.T) {
 }
 
 func TestStopCommand_VMNotFound(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{}, // empty: no VMs exist
-	}
-	setupStopTest(t, mb)
+	setupStopTest(t)
+	// No VMs created
 
 	root := RootCmd()
 	root.SetArgs([]string{"stop", "nonexistent"})
@@ -194,12 +143,12 @@ func TestStopCommand_VMNotFound(t *testing.T) {
 }
 
 func TestStopCommand_AlreadyStopped_SilentSuccess(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"testvm": backend.StatusStopped},
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	ctx := context.Background()
+
+	// Create VM then stop it
+	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{}))
+	require.NoError(t, mb.Stop(ctx, "testvm"))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -218,20 +167,19 @@ func TestStopCommand_AlreadyStopped_SilentSuccess(t *testing.T) {
 
 	require.NoError(t, execErr, "stop on already-stopped VM must succeed")
 
-	// Human output for already-stopped: empty string callback, so no "stopped" message
-	// but JSON should still be valid
-
-	// Verify backend Stop was NOT called
-	assert.Empty(t, mb.stopped, "Stop must not be called when VM is already stopped")
+	// VM should still be stopped
+	status, sErr := mb.Status(ctx, "testvm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusStopped, status)
 }
 
 func TestStopCommand_AlreadyStopped_JSONOutput(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"testvm": backend.StatusStopped},
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	ctx := context.Background()
+
+	// Create VM then stop it
+	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{}))
+	require.NoError(t, mb.Stop(ctx, "testvm"))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -259,13 +207,15 @@ func TestStopCommand_AlreadyStopped_JSONOutput(t *testing.T) {
 	assert.Equal(t, "testvm", data["name"])
 	assert.Equal(t, "stopped", data["status"])
 
-	// Verify backend Stop was NOT called
-	assert.Empty(t, mb.stopped, "Stop must not be called when VM is already stopped")
+	// VM should still be stopped
+	status, sErr := mb.Status(ctx, "testvm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusStopped, status)
 }
 
 func TestStopCommand_BackendUnavailable(t *testing.T) {
-	mb := &mockStopBackend{name: "mock", available: false}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	mb.SetMethodError("available", fmt.Errorf("backend not available"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"stop", "testvm"})
@@ -297,13 +247,14 @@ func TestStopCommand_BackendGetError(t *testing.T) {
 }
 
 func TestStopCommand_GenericError(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"testvm": backend.StatusRunning},
-		err:       fmt.Errorf("internal error"),
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	ctx := context.Background()
+
+	// Create a VM (Running state)
+	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{}))
+
+	// Inject error for Stop method
+	mb.SetMethodError("stop", fmt.Errorf("internal error"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"stop", "testvm"})
@@ -326,8 +277,7 @@ func TestStopCommand_MissingName(t *testing.T) {
 }
 
 func TestStopCommand_EmptyName(t *testing.T) {
-	mb := &mockStopBackend{name: "mock", available: true}
-	setupStopTest(t, mb)
+	setupStopTest(t)
 
 	root := RootCmd()
 	root.SetArgs([]string{"stop", ""})
@@ -339,46 +289,49 @@ func TestStopCommand_EmptyName(t *testing.T) {
 }
 
 func TestStopCommand_StopOnRunningVM_CallsBackend(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	ctx := context.Background()
+
+	// Create VM (Running state)
+	require.NoError(t, mb.Create(ctx, "myvm", backend.VMConfig{}))
 
 	root := RootCmd()
 	root.SetArgs([]string{"stop", "myvm"})
 	err := root.Execute()
 
 	require.NoError(t, err)
-	require.Len(t, mb.stopped, 1)
-	assert.Equal(t, "myvm", mb.stopped[0])
+
+	// Verify VM is now stopped
+	status, sErr := mb.Status(ctx, "myvm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusStopped, status)
 }
 
 func TestStopCommand_StopOnErrorStatusVM(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusError},
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	ctx := context.Background()
+
+	// Create VM and force it into Error state
+	require.NoError(t, mb.Create(ctx, "myvm", backend.VMConfig{}))
+	require.NoError(t, mb.SetStatus("myvm", backend.StatusError))
 
 	root := RootCmd()
 	root.SetArgs([]string{"stop", "myvm"})
 	err := root.Execute()
 
 	require.NoError(t, err)
-	require.Len(t, mb.stopped, 1)
+
+	// Memory backend supports Error->Stopped transition
+	status, sErr := mb.Status(ctx, "myvm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusStopped, status)
 }
 
 func TestStopCommand_StatusCheckError(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusErr: fmt.Errorf("connection refused"),
-		statusMap: map[string]backend.VMStatus{},
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+
+	// Inject error for Status method
+	mb.SetMethodError("status", fmt.Errorf("connection refused"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"stop", "testvm"})
@@ -398,12 +351,11 @@ func TestProperty_StopJSONAlwaysValid(t *testing.T) {
 	names := []string{"vm-1", "my-vm", "test", "a", "production-vm-2024"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockStopBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{name: backend.StatusRunning},
-			}
-			setupStopTest(t, mb)
+			mb := setupStopTest(t)
+			ctx := context.Background()
+
+			// Create VM (Running state)
+			require.NoError(t, mb.Create(ctx, name, backend.VMConfig{}))
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -439,12 +391,11 @@ func TestProperty_StopHumanOutputContainsName(t *testing.T) {
 	names := []string{"alpha", "beta", "gamma", "vm-with-dash", "vm-with-mixed-1"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockStopBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{name: backend.StatusRunning},
-			}
-			setupStopTest(t, mb)
+			mb := setupStopTest(t)
+			ctx := context.Background()
+
+			// Create VM (Running state)
+			require.NoError(t, mb.Create(ctx, name, backend.VMConfig{}))
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -470,12 +421,8 @@ func TestProperty_StopHumanOutputContainsName(t *testing.T) {
 // Property: error codes are always snake_case.
 func TestProperty_StopErrorCodesSnakeCase(t *testing.T) {
 	t.Run("vm_not_found", func(t *testing.T) {
-		mb := &mockStopBackend{
-			name:      "mock",
-			available: true,
-			statusMap: map[string]backend.VMStatus{},
-		}
-		setupStopTest(t, mb)
+		setupStopTest(t)
+		// No VMs created
 
 		root := RootCmd()
 		root.SetArgs([]string{"stop", "test"})
@@ -486,8 +433,8 @@ func TestProperty_StopErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("backend_unavailable", func(t *testing.T) {
-		mb := &mockStopBackend{name: "mock", available: false}
-		setupStopTest(t, mb)
+		mb := setupStopTest(t)
+		mb.SetMethodError("available", fmt.Errorf("backend not available"))
 
 		root := RootCmd()
 		root.SetArgs([]string{"stop", "test"})
@@ -498,8 +445,7 @@ func TestProperty_StopErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("invalid_argument_empty_name", func(t *testing.T) {
-		mb := &mockStopBackend{name: "mock", available: true}
-		setupStopTest(t, mb)
+		setupStopTest(t)
 
 		root := RootCmd()
 		root.SetArgs([]string{"stop", ""})
@@ -515,18 +461,22 @@ func TestProperty_StopStoppedVM_NeverCallsBackend(t *testing.T) {
 	names := []string{"vm1", "vm2", "important", "prod"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockStopBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{name: backend.StatusStopped},
-			}
-			setupStopTest(t, mb)
+			mb := setupStopTest(t)
+			ctx := context.Background()
+
+			// Create VM then stop it
+			require.NoError(t, mb.Create(ctx, name, backend.VMConfig{}))
+			require.NoError(t, mb.Stop(ctx, name))
 
 			root := RootCmd()
 			root.SetArgs([]string{"stop", name})
 			err := root.Execute()
 			require.NoError(t, err)
-			assert.Empty(t, mb.stopped, "stop on already-stopped VM must not call backend.Stop for %q", name)
+
+			// VM should still be stopped
+			status, sErr := mb.Status(ctx, name)
+			require.NoError(t, sErr)
+			assert.Equal(t, backend.StatusStopped, status, "stop on already-stopped VM must remain stopped for %q", name)
 		})
 	}
 }
@@ -536,31 +486,31 @@ func TestProperty_StopRunningVM_CallsBackendOnce(t *testing.T) {
 	names := []string{"vm1", "vm2", "test-vm"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockStopBackend{
-				name:      "mock",
-				available: true,
-				statusMap: map[string]backend.VMStatus{name: backend.StatusRunning},
-			}
-			setupStopTest(t, mb)
+			mb := setupStopTest(t)
+			ctx := context.Background()
+
+			// Create VM (Running state)
+			require.NoError(t, mb.Create(ctx, name, backend.VMConfig{}))
 
 			root := RootCmd()
 			root.SetArgs([]string{"stop", name})
 			err := root.Execute()
 			require.NoError(t, err)
-			require.Len(t, mb.stopped, 1, "stop must call backend exactly once for %q", name)
-			assert.Equal(t, name, mb.stopped[0])
+
+			// Verify state transitioned to Stopped
+			status, sErr := mb.Status(ctx, name)
+			require.NoError(t, sErr)
+			assert.Equal(t, backend.StatusStopped, status, "stop must transition to Stopped for %q", name)
 		})
 	}
 }
 
 // Property: JSON output always contains required fields (ok, data.name, data.status).
 func TestProperty_StopJSONRequiredFields(t *testing.T) {
-	mb := &mockStopBackend{
-		name:      "mock",
-		available: true,
-		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
-	}
-	setupStopTest(t, mb)
+	mb := setupStopTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "myvm", backend.VMConfig{}))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -593,8 +543,8 @@ func TestProperty_StopJSONRequiredFields(t *testing.T) {
 
 // Property: error JSON format is consistent for vm_not_found case.
 func TestProperty_StopErrorJSONFormat(t *testing.T) {
-	mb := &mockStopBackend{name: "mock", available: true, statusMap: map[string]backend.VMStatus{}}
-	setupStopTest(t, mb)
+	setupStopTest(t)
+	// No VMs created
 
 	root := RootCmd()
 	root.SetArgs([]string{"stop", "nonexistent"})

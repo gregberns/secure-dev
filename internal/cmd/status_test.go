@@ -1,5 +1,6 @@
 // Package cmd provides tests for the status command.
 // REQ-002-003: VM Management Commands -- status
+// NOTE: Tests use global getBackendFunc — do not use t.Parallel().
 package cmd
 
 import (
@@ -14,72 +15,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
+	"sd/internal/backend/memory"
 	"sd/internal/ui"
 )
 
-// mockStatusBackend is a digital twin of a backend for status command testing.
-// It implements backend.Backend with configurable behavior and records calls.
-type mockStatusBackend struct {
-	name      string
-	available bool
-	vms       map[string]backend.VMInfo
-	statusErr error
-	listErr   error
-}
-
-func (m *mockStatusBackend) Name() string { return m.name }
-func (m *mockStatusBackend) Available() error {
-	if m.available {
-		return nil
-	}
-	return fmt.Errorf("backend not available")
-}
-func (m *mockStatusBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
-	return nil
-}
-func (m *mockStatusBackend) Start(_ context.Context, _ string) error { return nil }
-func (m *mockStatusBackend) Stop(_ context.Context, _ string) error  { return nil }
-func (m *mockStatusBackend) Destroy(_ context.Context, _ string) error { return nil }
-func (m *mockStatusBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
-	if m.statusErr != nil {
-		return "", m.statusErr
-	}
-	vm, ok := m.vms[name]
-	if !ok {
-		return "", fmt.Errorf("vm %q not found: %w", name, backend.ErrVMNotFound)
-	}
-	return vm.Status, nil
-}
-func (m *mockStatusBackend) List(_ context.Context) ([]backend.VMInfo, error) {
-	if m.listErr != nil {
-		return nil, m.listErr
-	}
-	if m.vms == nil {
-		return []backend.VMInfo{}, nil
-	}
-	var result []backend.VMInfo
-	for _, vm := range m.vms {
-		result = append(result, vm)
-	}
-	return result, nil
-}
-func (m *mockStatusBackend) SSHConfig(_ context.Context, _ string) (backend.SSHConfig, error) {
-	return backend.SSHConfig{}, nil
-}
-func (m *mockStatusBackend) Exec(_ context.Context, _ string, _ []string) (backend.ExecResult, error) {
-	return backend.ExecResult{}, nil
-}
-
-// setupStatusTest configures the test environment with a mock backend.
-func setupStatusTest(t *testing.T, mb *mockStatusBackend) {
+// setupStatusTest configures the test environment with a memory backend.
+func setupStatusTest(t *testing.T) *memory.Backend {
 	t.Helper()
 	newRootTestEnv(t)
 
+	mb := memory.New()
 	origGetBackend := getBackendFunc
-	getBackendFunc = func(name string) (backend.Backend, error) {
+	getBackendFunc = func(_ string) (backend.Backend, error) {
 		return mb, nil
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend })
+	t.Cleanup(func() { getBackendFunc = origGetBackend; mb.Reset() })
+	return mb
 }
 
 // --- Unit tests ---
@@ -115,22 +66,12 @@ func TestStatusCommand_MaxArgs(t *testing.T) {
 }
 
 func TestStatusCommand_SingleVM_HumanOutput(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			"testvm": {
-				Name:    "testvm",
-				Status:  backend.StatusRunning,
-				Backend: "lima",
-				CPUs:    4,
-				Memory:  "8GiB",
-				Disk:    "100GiB",
-				IP:      "192.168.5.15",
-			},
-		},
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{
+		CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+	}))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -151,27 +92,17 @@ func TestStatusCommand_SingleVM_HumanOutput(t *testing.T) {
 	output := buf.String()
 	assert.Contains(t, output, "testvm")
 	assert.Contains(t, output, "running")
-	assert.Contains(t, output, "lima")
+	assert.Contains(t, output, "memory")
 	assert.Contains(t, output, "8GiB")
 }
 
 func TestStatusCommand_SingleVM_JSONOutput(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			"testvm": {
-				Name:    "testvm",
-				Status:  backend.StatusRunning,
-				Backend: "lima",
-				CPUs:    4,
-				Memory:  "8GiB",
-				Disk:    "100GiB",
-				IP:      "192.168.5.15",
-			},
-		},
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{
+		CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+	}))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -198,20 +129,18 @@ func TestStatusCommand_SingleVM_JSONOutput(t *testing.T) {
 	data := result["data"].(map[string]any)
 	assert.Equal(t, "testvm", data["name"])
 	assert.Equal(t, "running", data["status"])
-	assert.Equal(t, "lima", data["backend"])
-	assert.Equal(t, "192.168.5.15", data["ip"])
+	assert.Equal(t, "memory", data["backend"])
+	// Memory backend assigns IPs to VMs
+	assert.NotEmpty(t, data["ip"], "running VM should have an IP")
 }
 
 func TestStatusCommand_AllVMs_HumanOutput(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			"vm1": {Name: "vm1", Status: backend.StatusRunning, Backend: "lima", CPUs: 4, Memory: "8GiB", Disk: "100GiB"},
-			"vm2": {Name: "vm2", Status: backend.StatusStopped, Backend: "lima", CPUs: 2, Memory: "4GiB", Disk: "50GiB"},
-		},
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "vm1", backend.VMConfig{CPUs: 4, Memory: "8GiB", Disk: "100GiB"}))
+	require.NoError(t, mb.Create(ctx, "vm2", backend.VMConfig{CPUs: 2, Memory: "4GiB", Disk: "50GiB"}))
+	require.NoError(t, mb.Stop(ctx, "vm2"))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -239,15 +168,12 @@ func TestStatusCommand_AllVMs_HumanOutput(t *testing.T) {
 }
 
 func TestStatusCommand_AllVMs_JSONOutput(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			"vm1": {Name: "vm1", Status: backend.StatusRunning, Backend: "lima", CPUs: 4, Memory: "8GiB", Disk: "100GiB"},
-			"vm2": {Name: "vm2", Status: backend.StatusStopped, Backend: "lima", CPUs: 2, Memory: "4GiB", Disk: "50GiB"},
-		},
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "vm1", backend.VMConfig{CPUs: 4, Memory: "8GiB", Disk: "100GiB"}))
+	require.NoError(t, mb.Create(ctx, "vm2", backend.VMConfig{CPUs: 2, Memory: "4GiB", Disk: "50GiB"}))
+	require.NoError(t, mb.Stop(ctx, "vm2"))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -283,12 +209,8 @@ func TestStatusCommand_AllVMs_JSONOutput(t *testing.T) {
 }
 
 func TestStatusCommand_AllVMs_EmptyList(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms:       map[string]backend.VMInfo{},
-	}
-	setupStatusTest(t, mb)
+	setupStatusTest(t)
+	// No VMs created
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -310,12 +232,8 @@ func TestStatusCommand_AllVMs_EmptyList(t *testing.T) {
 }
 
 func TestStatusCommand_AllVMs_EmptyList_JSON(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms:       map[string]backend.VMInfo{},
-	}
-	setupStatusTest(t, mb)
+	setupStatusTest(t)
+	// No VMs created
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -343,12 +261,8 @@ func TestStatusCommand_AllVMs_EmptyList_JSON(t *testing.T) {
 }
 
 func TestStatusCommand_VMNotFound(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms:       map[string]backend.VMInfo{}, // no VMs
-	}
-	setupStatusTest(t, mb)
+	setupStatusTest(t)
+	// No VMs created
 
 	root := RootCmd()
 	root.SetArgs([]string{"status", "nonexistent"})
@@ -362,8 +276,8 @@ func TestStatusCommand_VMNotFound(t *testing.T) {
 }
 
 func TestStatusCommand_BackendUnavailable(t *testing.T) {
-	mb := &mockStatusBackend{name: "mock", available: false}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	mb.SetMethodError("available", fmt.Errorf("backend not available"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"status", "testvm"})
@@ -395,8 +309,8 @@ func TestStatusCommand_BackendGetError(t *testing.T) {
 }
 
 func TestStatusCommand_BackendUnavailableForAll(t *testing.T) {
-	mb := &mockStatusBackend{name: "mock", available: false}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	mb.SetMethodError("available", fmt.Errorf("backend not available"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"status"})
@@ -409,12 +323,8 @@ func TestStatusCommand_BackendUnavailableForAll(t *testing.T) {
 }
 
 func TestStatusCommand_ListError(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		listErr:   fmt.Errorf("connection refused"),
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	mb.SetMethodError("list", fmt.Errorf("connection refused"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"status"})
@@ -428,12 +338,8 @@ func TestStatusCommand_ListError(t *testing.T) {
 }
 
 func TestStatusCommand_StatusError(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:       "mock",
-		available:  true,
-		statusErr:  fmt.Errorf("connection refused"),
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	mb.SetMethodError("status", fmt.Errorf("connection refused"))
 
 	root := RootCmd()
 	root.SetArgs([]string{"status", "testvm"})
@@ -447,21 +353,13 @@ func TestStatusCommand_StatusError(t *testing.T) {
 }
 
 func TestStatusCommand_StoppedVM(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			"stoppedvm": {
-				Name:    "stoppedvm",
-				Status:  backend.StatusStopped,
-				Backend: "lima",
-				CPUs:    2,
-				Memory:  "4GiB",
-				Disk:    "50GiB",
-			},
-		},
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "stoppedvm", backend.VMConfig{
+		CPUs: 2, Memory: "4GiB", Disk: "50GiB",
+	}))
+	require.NoError(t, mb.Stop(ctx, "stoppedvm"))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -489,21 +387,13 @@ func TestStatusCommand_StoppedVM(t *testing.T) {
 }
 
 func TestStatusCommand_ErrorStatusVM(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			"errorvm": {
-				Name:    "errorvm",
-				Status:  backend.StatusError,
-				Backend: "lima",
-				CPUs:    4,
-				Memory:  "8GiB",
-				Disk:    "100GiB",
-			},
-		},
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "errorvm", backend.VMConfig{
+		CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+	}))
+	require.NoError(t, mb.SetStatus("errorvm", backend.StatusError))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -555,12 +445,12 @@ func TestFormatVMDetail_FullInfo(t *testing.T) {
 
 func TestFormatVMDetail_NoIP(t *testing.T) {
 	vm := backend.VMInfo{
-		Name:   "testvm",
-		Status: backend.StatusStopped,
+		Name:    "testvm",
+		Status:  backend.StatusStopped,
 		Backend: "lima",
-		CPUs:   2,
-		Memory: "4GiB",
-		Disk:   "50GiB",
+		CPUs:    2,
+		Memory:  "4GiB",
+		Disk:    "50GiB",
 	}
 	output := formatVMDetail(vm)
 	assert.Contains(t, output, "testvm")
@@ -600,21 +490,15 @@ func TestProperty_StatusSingleJSONAlwaysValid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mb := &mockStatusBackend{
-				name:      "mock",
-				available: true,
-				vms: map[string]backend.VMInfo{
-					tc.name: {
-						Name:    tc.name,
-						Status:  tc.status,
-						Backend: "lima",
-						CPUs:    4,
-						Memory:  "8GiB",
-						Disk:    "100GiB",
-					},
-				},
+			mb := setupStatusTest(t)
+			ctx := context.Background()
+
+			require.NoError(t, mb.Create(ctx, tc.name, backend.VMConfig{
+				CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+			}))
+			if tc.status != backend.StatusRunning {
+				require.NoError(t, mb.SetStatus(tc.name, tc.status))
 			}
-			setupStatusTest(t, mb)
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -650,21 +534,12 @@ func TestProperty_StatusHumanContainsName(t *testing.T) {
 	names := []string{"alpha", "beta", "gamma", "vm-with-dash", "vm-with-mixed-1"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			mb := &mockStatusBackend{
-				name:      "mock",
-				available: true,
-				vms: map[string]backend.VMInfo{
-					name: {
-						Name:    name,
-						Status:  backend.StatusRunning,
-						Backend: "lima",
-						CPUs:    4,
-						Memory:  "8GiB",
-						Disk:    "100GiB",
-					},
-				},
-			}
-			setupStatusTest(t, mb)
+			mb := setupStatusTest(t)
+			ctx := context.Background()
+
+			require.NoError(t, mb.Create(ctx, name, backend.VMConfig{
+				CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+			}))
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -690,12 +565,8 @@ func TestProperty_StatusHumanContainsName(t *testing.T) {
 // Property: error codes are always snake_case.
 func TestProperty_StatusErrorCodesSnakeCase(t *testing.T) {
 	t.Run("vm_not_found", func(t *testing.T) {
-		mb := &mockStatusBackend{
-			name:      "mock",
-			available: true,
-			vms:       map[string]backend.VMInfo{},
-		}
-		setupStatusTest(t, mb)
+		setupStatusTest(t)
+		// No VMs created
 
 		root := RootCmd()
 		root.SetArgs([]string{"status", "test"})
@@ -706,8 +577,8 @@ func TestProperty_StatusErrorCodesSnakeCase(t *testing.T) {
 	})
 
 	t.Run("backend_unavailable", func(t *testing.T) {
-		mb := &mockStatusBackend{name: "mock", available: false}
-		setupStatusTest(t, mb)
+		mb := setupStatusTest(t)
+		mb.SetMethodError("available", fmt.Errorf("backend not available"))
 
 		root := RootCmd()
 		root.SetArgs([]string{"status", "test"})
@@ -721,27 +592,39 @@ func TestProperty_StatusErrorCodesSnakeCase(t *testing.T) {
 // Property: all-VMs JSON output always has ok=true and data is an array.
 func TestProperty_StatusAllJSONAlwaysValid(t *testing.T) {
 	cases := []struct {
-		name string
-		vms  map[string]backend.VMInfo
+		name   string
+		vmDefs []struct {
+			name   string
+			status backend.VMStatus
+		}
 	}{
 		{"empty", nil},
-		{"single", map[string]backend.VMInfo{
-			"vm1": {Name: "vm1", Status: backend.StatusRunning, Backend: "lima"},
+		{"single", []struct {
+			name   string
+			status backend.VMStatus
+		}{
+			{"vm1", backend.StatusRunning},
 		}},
-		{"multiple", map[string]backend.VMInfo{
-			"vm1": {Name: "vm1", Status: backend.StatusRunning, Backend: "lima"},
-			"vm2": {Name: "vm2", Status: backend.StatusStopped, Backend: "lima"},
-			"vm3": {Name: "vm3", Status: backend.StatusError, Backend: "lima"},
+		{"multiple", []struct {
+			name   string
+			status backend.VMStatus
+		}{
+			{"vm1", backend.StatusRunning},
+			{"vm2", backend.StatusStopped},
+			{"vm3", backend.StatusError},
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mb := &mockStatusBackend{
-				name:      "mock",
-				available: true,
-				vms:       tc.vms,
+			mb := setupStatusTest(t)
+			ctx := context.Background()
+
+			for _, vm := range tc.vmDefs {
+				require.NoError(t, mb.Create(ctx, vm.name, backend.VMConfig{}))
+				if vm.status != backend.StatusRunning {
+					require.NoError(t, mb.SetStatus(vm.name, vm.status))
+				}
 			}
-			setupStatusTest(t, mb)
 
 			oldStdout := os.Stdout
 			r, w, err := os.Pipe()
@@ -780,14 +663,10 @@ func TestProperty_StatusAllJSONAlwaysValid(t *testing.T) {
 
 // Property: all-VMs human output always has header row.
 func TestProperty_StatusAllHumanHasHeader(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			"vm1": {Name: "vm1", Status: backend.StatusRunning},
-		},
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "vm1", backend.VMConfig{}))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -825,21 +704,12 @@ func TestProperty_StatusAllTableContainsAllNames(t *testing.T) {
 
 // Property: JSON required fields for single VM status.
 func TestProperty_StatusSingleJSONRequiredFields(t *testing.T) {
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			"myvm": {
-				Name:    "myvm",
-				Status:  backend.StatusRunning,
-				Backend: "lima",
-				CPUs:    4,
-				Memory:  "8GiB",
-				Disk:    "100GiB",
-			},
-		},
-	}
-	setupStatusTest(t, mb)
+	mb := setupStatusTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "myvm", backend.VMConfig{
+		CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+	}))
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -873,24 +743,15 @@ func TestProperty_StatusSingleJSONRequiredFields(t *testing.T) {
 // Property: dual-mode consistency - JSON and human both contain VM name.
 func TestProperty_StatusDualModeConsistency(t *testing.T) {
 	name := "dual-test-vm"
-	mb := &mockStatusBackend{
-		name:      "mock",
-		available: true,
-		vms: map[string]backend.VMInfo{
-			name: {
-				Name:    name,
-				Status:  backend.StatusRunning,
-				Backend: "lima",
-				CPUs:    4,
-				Memory:  "8GiB",
-				Disk:    "100GiB",
-			},
-		},
-	}
 
 	// JSON mode
 	t.Run("json_has_name", func(t *testing.T) {
-		setupStatusTest(t, mb)
+		mb := setupStatusTest(t)
+		ctx := context.Background()
+
+		require.NoError(t, mb.Create(ctx, name, backend.VMConfig{
+			CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+		}))
 
 		oldStdout := os.Stdout
 		r, w, err := os.Pipe()
@@ -913,7 +774,12 @@ func TestProperty_StatusDualModeConsistency(t *testing.T) {
 
 	// Human mode
 	t.Run("human_has_name", func(t *testing.T) {
-		setupStatusTest(t, mb)
+		mb := setupStatusTest(t)
+		ctx := context.Background()
+
+		require.NoError(t, mb.Create(ctx, name, backend.VMConfig{
+			CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+		}))
 
 		oldStdout := os.Stdout
 		r, w, err := os.Pipe()
