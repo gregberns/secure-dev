@@ -88,7 +88,14 @@ func setupProvisionTest(t *testing.T, mb *mockProvisionBackend) {
 	getBackendFunc = func(name string) (backend.Backend, error) {
 		return mb, nil
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend })
+	origValidateBackend := validateBackendFunc
+	validateBackendFunc = func(_ string) error {
+		return nil
+	}
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		validateBackendFunc = origValidateBackend
+	})
 
 	// Reset --modules flag on provision subcommand to prevent leakage between tests.
 	root := RootCmd()

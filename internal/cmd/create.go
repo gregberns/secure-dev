@@ -31,7 +31,7 @@ func init() {
 		Long: `Create a new VM environment for running AI coding agents.
 The VM is provisioned using the configured backend (default: lima).`,
 		GroupID: "vm",
-		Args:    cobra.ExactArgs(1),
+		Args:    exactArgs(1, "<name> [flags]"),
 		RunE:    runCreate,
 	}
 
@@ -80,6 +80,16 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 	if backendName == "" {
 		backendName = "lima"
+	}
+
+	// REQ-002-003: Validate resource flags before building config
+	if err := validateCreateResources(cmd); err != nil {
+		return err
+	}
+
+	// REQ-002-003: Validate backend name is registered
+	if err := validateBackendFunc(backendName); err != nil {
+		return err
 	}
 
 	// Build VMConfig from flags and config defaults

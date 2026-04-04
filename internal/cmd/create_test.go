@@ -61,7 +61,8 @@ func setupCreateTest(t *testing.T) *memory.Backend {
 	t.Helper()
 	newRootTestEnv(t)
 
-	// Reset create command's local flags to prevent StringArray accumulation
+	// Reset create command's local flags to prevent StringArray accumulation.
+	// Also reset Changed so validation only triggers for flags explicitly set in the test.
 	root := RootCmd()
 	for _, cmd := range root.Commands() {
 		if cmd.Name() == "create" {
@@ -69,9 +70,13 @@ func setupCreateTest(t *testing.T) *memory.Backend {
 			resetSliceFlag(cmd, "allow-egress")
 			resetSliceFlag(cmd, "modules")
 			_ = cmd.Flags().Set("backend", "")
+			cmd.Flags().Lookup("backend").Changed = false
 			_ = cmd.Flags().Set("cpus", "0")
+			cmd.Flags().Lookup("cpus").Changed = false
 			_ = cmd.Flags().Set("memory", "")
+			cmd.Flags().Lookup("memory").Changed = false
 			_ = cmd.Flags().Set("disk", "")
+			cmd.Flags().Lookup("disk").Changed = false
 			break
 		}
 	}
@@ -81,7 +86,15 @@ func setupCreateTest(t *testing.T) *memory.Backend {
 	getBackendFunc = func(_ string) (backend.Backend, error) {
 		return mb, nil
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend; mb.Reset() })
+	origValidateBackend := validateBackendFunc
+	validateBackendFunc = func(_ string) error {
+		return nil
+	}
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		validateBackendFunc = origValidateBackend
+		mb.Reset()
+	})
 	return mb
 }
 
@@ -828,7 +841,7 @@ func setupProvisionCreateTest(t *testing.T, mb *mockProvisionBackend) {
 	t.Helper()
 	setupProvisionTest(t, mb)
 
-	// Also reset create command flags
+	// Also reset create command flags and Changed state
 	root := RootCmd()
 	for _, cmd := range root.Commands() {
 		if cmd.Name() == "create" {
@@ -836,9 +849,13 @@ func setupProvisionCreateTest(t *testing.T, mb *mockProvisionBackend) {
 			resetSliceFlag(cmd, "allow-egress")
 			resetSliceFlag(cmd, "modules")
 			_ = cmd.Flags().Set("backend", "")
+			cmd.Flags().Lookup("backend").Changed = false
 			_ = cmd.Flags().Set("cpus", "0")
+			cmd.Flags().Lookup("cpus").Changed = false
 			_ = cmd.Flags().Set("memory", "")
+			cmd.Flags().Lookup("memory").Changed = false
 			_ = cmd.Flags().Set("disk", "")
+			cmd.Flags().Lookup("disk").Changed = false
 			break
 		}
 	}
@@ -998,6 +1015,275 @@ func TestProperty_Create_ProvisionFailureAlwaysCleansUp(t *testing.T) {
 			err := root.Execute()
 
 			require.Error(t, err)
+		})
+	}
+}
+
+// --- REQ-002-003: Resource flag validation tests ---
+
+func TestCreateCommand_InvalidCPUs_Negative(t *testing.T) {
+	setupCreateTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--cpus", "-1"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_cpus", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "-1")
+}
+
+func TestCreateCommand_InvalidCPUs_Zero(t *testing.T) {
+	setupCreateTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--cpus", "0"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_cpus", cliErr.Code)
+}
+
+func TestCreateCommand_InvalidCPUs_TooHigh(t *testing.T) {
+	setupCreateTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--cpus", "999"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_cpus", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "999")
+}
+
+func TestCreateCommand_InvalidMemory_Nonsense(t *testing.T) {
+	setupCreateTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--memory", "banana"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_memory", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "banana")
+}
+
+func TestCreateCommand_InvalidMemory_Zero(t *testing.T) {
+	setupCreateTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--memory", "0GiB"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_memory", cliErr.Code)
+}
+
+func TestCreateCommand_InvalidMemory_NoUnit(t *testing.T) {
+	setupCreateTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--memory", "1024"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_memory", cliErr.Code)
+}
+
+func TestCreateCommand_InvalidDisk_Nonsense(t *testing.T) {
+	setupCreateTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--disk", "lots"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_disk", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "lots")
+}
+
+func TestCreateCommand_InvalidDisk_Zero(t *testing.T) {
+	setupCreateTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--disk", "0GiB"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_disk", cliErr.Code)
+}
+
+func TestCreateCommand_InvalidBackend(t *testing.T) {
+	setupCreateTest(t)
+
+	// Override validateBackendFunc to actually reject unknown backends
+	origValidate := validateBackendFunc
+	validateBackendFunc = func(name string) error {
+		if name == "nonexistent" {
+			return ui.CLIError{
+				Code:    "invalid_backend",
+				Message: fmt.Sprintf("unknown backend %q", name),
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { validateBackendFunc = origValidate })
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "testvm", "--backend", "nonexistent"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_backend", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "nonexistent")
+}
+
+func TestCreateCommand_ValidCPUs_Boundary(t *testing.T) {
+	cases := []struct {
+		name string
+		cpus string
+	}{
+		{"min", "1"},
+		{"max", "256"},
+		{"typical", "4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCreateTest(t)
+
+			root := RootCmd()
+			root.SetArgs([]string{"create", "testvm", "--cpus", tc.cpus})
+			err := root.Execute()
+
+			require.NoError(t, err, "--cpus=%s should be valid", tc.cpus)
+		})
+	}
+}
+
+func TestCreateCommand_ValidMemory(t *testing.T) {
+	cases := []struct {
+		name   string
+		memory string
+	}{
+		{"gib", "4GiB"},
+		{"mib", "512MiB"},
+		{"gb", "8GB"},
+		{"tb", "1TB"},
+		{"kib", "1024KiB"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCreateTest(t)
+
+			root := RootCmd()
+			root.SetArgs([]string{"create", "testvm", "--memory", tc.memory})
+			err := root.Execute()
+
+			require.NoError(t, err, "--memory=%s should be valid", tc.memory)
+		})
+	}
+}
+
+func TestCreateCommand_ValidDisk(t *testing.T) {
+	cases := []struct {
+		name string
+		disk string
+	}{
+		{"gib", "100GiB"},
+		{"gb", "50GB"},
+		{"tb", "1TB"},
+		{"tib", "2TiB"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCreateTest(t)
+
+			root := RootCmd()
+			root.SetArgs([]string{"create", "testvm", "--disk", tc.disk})
+			err := root.Execute()
+
+			require.NoError(t, err, "--disk=%s should be valid", tc.disk)
+		})
+	}
+}
+
+// Property: all invalid resource values are always rejected with correct error codes.
+func TestProperty_Create_InvalidResourcesAlwaysRejected(t *testing.T) {
+	cases := []struct {
+		name     string
+		flag     string
+		value    string
+		wantCode string
+	}{
+		{"cpus_negative", "--cpus", "-1", "invalid_cpus"},
+		{"cpus_zero", "--cpus", "0", "invalid_cpus"},
+		{"cpus_too_high", "--cpus", "257", "invalid_cpus"},
+		{"cpus_way_too_high", "--cpus", "999", "invalid_cpus"},
+		{"memory_banana", "--memory", "banana", "invalid_memory"},
+		{"memory_zero", "--memory", "0GiB", "invalid_memory"},
+		{"memory_no_unit", "--memory", "1024", "invalid_memory"},
+		{"memory_empty_string", "--memory", "", "invalid_memory"},
+		{"disk_lots", "--disk", "lots", "invalid_disk"},
+		{"disk_zero", "--disk", "0GiB", "invalid_disk"},
+		{"disk_no_unit", "--disk", "42", "invalid_disk"},
+		{"disk_negative_like", "--disk", "-5GiB", "invalid_disk"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCreateTest(t)
+
+			root := RootCmd()
+			root.SetArgs([]string{"create", "testvm", tc.flag, tc.value})
+			err := root.Execute()
+
+			require.Error(t, err, "%s=%s must be rejected", tc.flag, tc.value)
+			cliErr, ok := err.(ui.CLIError)
+			require.True(t, ok, "must be a CLIError for %s=%s", tc.flag, tc.value)
+			assert.Equal(t, tc.wantCode, cliErr.Code, "wrong error code for %s=%s", tc.flag, tc.value)
+		})
+	}
+}
+
+// --- validateSizeString unit tests ---
+
+func TestValidateSizeString(t *testing.T) {
+	valid := []string{
+		"4GiB", "512MiB", "100GB", "1TB", "8GiB", "1024KiB",
+		"2TiB", "1PiB", "256MB", "10kB",
+	}
+	for _, s := range valid {
+		t.Run("valid_"+s, func(t *testing.T) {
+			err := validateSizeString(s)
+			assert.NoError(t, err, "%q should be valid", s)
+		})
+	}
+
+	invalid := []string{
+		"", "0GiB", "banana", "1024", "-5GiB", "0", "GiB", "4.5GiB",
+		"4 G i B", "0MB",
+	}
+	for _, s := range invalid {
+		t.Run("invalid_"+s, func(t *testing.T) {
+			err := validateSizeString(s)
+			assert.Error(t, err, "%q should be invalid", s)
 		})
 	}
 }
