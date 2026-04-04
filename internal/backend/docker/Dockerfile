@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y \
     openssh-server sudo bash curl git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash ubuntu \
+RUN id -u ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu \
     && echo "ubuntu ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
     && mkdir -p /home/ubuntu/.ssh \
     && chmod 700 /home/ubuntu/.ssh \
