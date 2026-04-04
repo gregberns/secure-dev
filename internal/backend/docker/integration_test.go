@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"sd/internal/backend"
+	"sd/internal/backend/conformance"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -292,4 +293,17 @@ func TestDockerDuplicateCreate(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, backend.ErrVMAlreadyExists,
 		"duplicate create should return ErrVMAlreadyExists")
+}
+
+// TestDockerConformance runs the shared conformance suite against the Docker
+// backend. This validates the Backend interface contract with real containers.
+// REQ-008-022
+func TestDockerConformance(t *testing.T) {
+	b := newTestBackend(t)
+	conformance.RunAll(t, conformance.ConformanceOpts{
+		Backend:  b,
+		Timeout:  300 * time.Second,
+		Setup:    func(t *testing.T) { cleanupContainers(t) },
+		Teardown: func(t *testing.T) { cleanupContainers(t) },
+	})
 }
