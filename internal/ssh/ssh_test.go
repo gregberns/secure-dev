@@ -44,15 +44,32 @@ func TestGenerateKeys_CreatesKeyPair(t *testing.T) {
 	assert.Contains(t, string(pubContent), "ssh-ed25519")
 }
 
-func TestGenerateKeys_RejectsOverwrite(t *testing.T) {
+func TestGenerateKeys_IdempotentWhenKeysExist(t *testing.T) {
 	dir := t.TempDir()
 	sdHome := filepath.Join(dir, ".sd")
 
 	err := GenerateKeys(sdHome, "testvm")
 	require.NoError(t, err)
 
+	// Read the original keys.
+	_, privPath, pubPath := KeyPaths(sdHome, "testvm")
+	origPriv, err := os.ReadFile(privPath)
+	require.NoError(t, err)
+	origPub, err := os.ReadFile(pubPath)
+	require.NoError(t, err)
+
+	// Second call must succeed (idempotent).
 	err = GenerateKeys(sdHome, "testvm")
-	assert.ErrorIs(t, err, ErrKeyExists)
+	require.NoError(t, err, "GenerateKeys must be idempotent when keys already exist")
+
+	// Keys must not have been regenerated.
+	priv2, err := os.ReadFile(privPath)
+	require.NoError(t, err)
+	pub2, err := os.ReadFile(pubPath)
+	require.NoError(t, err)
+
+	assert.Equal(t, origPriv, priv2, "private key must not change on second call")
+	assert.Equal(t, origPub, pub2, "public key must not change on second call")
 }
 
 func TestGenerateKeys_KeysAreUnique(t *testing.T) {

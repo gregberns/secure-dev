@@ -57,12 +57,12 @@ func KeyPaths(sdHome, vmName string) (dir, privateKey, publicKey string) {
 
 // GenerateKeys creates an Ed25519 key pair at the standard location for a VM.
 // The directory is created with 0700 and the private key with 0600.
-// Returns an error if keys already exist.
+// Idempotent: returns nil if keys already exist.
 func GenerateKeys(sdHome, vmName string) error {
 	dir, privPath, pubPath := KeyPaths(sdHome, vmName)
 
 	if _, err := os.Stat(privPath); err == nil {
-		return fmt.Errorf("%w: %s", ErrKeyExists, privPath)
+		return nil
 	}
 
 	if err := os.MkdirAll(dir, 0700); err != nil {
