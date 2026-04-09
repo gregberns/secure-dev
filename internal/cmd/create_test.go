@@ -115,7 +115,7 @@ func TestCreateCommand_Registered(t *testing.T) {
 	assert.True(t, found, "create command must be registered")
 }
 
-func TestCreateCommand_ExactArgs(t *testing.T) {
+func TestCreateCommand_RangeArgs(t *testing.T) {
 	newRootTestEnv(t)
 	root := RootCmd()
 
@@ -123,9 +123,15 @@ func TestCreateCommand_ExactArgs(t *testing.T) {
 	cmd, _, err := root.Find([]string{"create"})
 	require.NoError(t, err)
 	assert.NotNil(t, cmd.Args, "create must have an Args validator")
-	// Verify it rejects 0 args
+	// REQ-005-021: 0 args is now valid at the args layer (name comes from .sd.yaml)
 	err = cmd.Args(cmd, nil)
-	assert.Error(t, err, "create must reject zero args")
+	assert.NoError(t, err, "create must accept zero args (name resolved from .sd.yaml)")
+	// 1 arg is still valid
+	err = cmd.Args(cmd, []string{"test"})
+	assert.NoError(t, err, "create must accept one arg")
+	// 2 args is rejected
+	err = cmd.Args(cmd, []string{"a", "b"})
+	assert.Error(t, err, "create must reject two args")
 }
 
 func TestCreateCommand_Flags(t *testing.T) {
@@ -1314,4 +1320,77 @@ func TestProperty_Create_SensitiveMountNeverReachesBackend(t *testing.T) {
 			assert.ErrorIs(t, sErr, backend.ErrVMNotFound, "backend Create must never be called for sensitive mount %q", p)
 		})
 	}
+}
+
+// --- .sd.yaml project config integration tests ---
+
+func TestCreateCommand_SDYaml_NoArgs(t *testing.T) {
+	mb := setupCreateTest(t)
+	ctx := context.Background()
+
+	// Create a temp dir with .sd.yaml
+	dir := t.TempDir()
+	sdYaml := "name: yaml-vm\ncpus: 2\nmemory: 4GiB\n"
+	require.NoError(t, os.WriteFile(dir+"/.sd.yaml", []byte(sdYaml), 0644))
+
+	// Override getWorkingDir to point to our temp dir
+	origGetWD := getWorkingDir
+	getWorkingDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { getWorkingDir = origGetWD })
+
+	root := RootCmd()
+	root.SetArgs([]string{"create"})
+	err := root.Execute()
+	require.NoError(t, err)
+
+	// VM should be created with the .sd.yaml name
+	status, sErr := mb.Status(ctx, "yaml-vm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusRunning, status)
+}
+
+func TestCreateCommand_SDYaml_ExplicitNameOverrides(t *testing.T) {
+	mb := setupCreateTest(t)
+	ctx := context.Background()
+
+	// Create .sd.yaml with name "yaml-vm"
+	dir := t.TempDir()
+	sdYaml := "name: yaml-vm\n"
+	require.NoError(t, os.WriteFile(dir+"/.sd.yaml", []byte(sdYaml), 0644))
+
+	origGetWD := getWorkingDir
+	getWorkingDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { getWorkingDir = origGetWD })
+
+	root := RootCmd()
+	root.SetArgs([]string{"create", "explicit-name"})
+	err := root.Execute()
+	require.NoError(t, err)
+
+	// VM should use the explicit name, not .sd.yaml name
+	status, sErr := mb.Status(ctx, "explicit-name")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusRunning, status)
+
+	// .sd.yaml name should NOT be used
+	_, sErr = mb.Status(ctx, "yaml-vm")
+	assert.ErrorIs(t, sErr, backend.ErrVMNotFound)
+}
+
+func TestCreateCommand_NoArgs_NoSDYaml_Error(t *testing.T) {
+	setupCreateTest(t)
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir) // so FindProjectConfig stops searching
+
+	origGetWD := getWorkingDir
+	getWorkingDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { getWorkingDir = origGetWD })
+
+	root := RootCmd()
+	root.SetArgs([]string{"create"})
+	err := root.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing VM name")
+	assert.Contains(t, err.Error(), ".sd.yaml")
 }

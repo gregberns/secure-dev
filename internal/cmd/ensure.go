@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
 	"sd/internal/backend"
 	"sd/internal/config"
 	"sd/internal/security"
@@ -16,7 +17,7 @@ import (
 
 func init() {
 	ensureCmd := &cobra.Command{
-		Use:   "ensure <name>",
+		Use:   "ensure [name]",
 		Short: "Ensure a VM exists and is running",
 		Long: `Ensure a VM exists and is running. Creates the VM if it doesn't exist,
 starts it if stopped, and is a no-op if already running.
@@ -24,11 +25,15 @@ starts it if stopped, and is a no-op if already running.
 This is the idempotent command agents should use -- no need for
 check-then-branch logic around create/start.
 
+When no name is given, reads .sd.yaml from the current directory (or parent
+directories) for project configuration. This is the primary use case:
+  cd ~/code/my-app && sd ensure
+
 When the VM already exists, flags like --cpus, --memory, --modules are
 ignored. ensure guarantees existence and running state, not configuration.`,
 		GroupID: "vm",
 		Aliases: []string{"up"},
-		Args:    exactArgs(1, "<name> [flags]"),
+		Args:    rangeArgs(0, 1, "[name] [flags]"),
 		RunE:    runEnsure,
 	}
 
@@ -44,6 +49,13 @@ ignored. ensure guarantees existence and running state, not configuration.`,
 	rootCmd.AddCommand(ensureCmd)
 }
 
+// ensureProjCfg and ensureProjDir hold the project config discovered during
+// name resolution, passed from runEnsure to ensureCreate.
+var (
+	ensureProjCfg *config.ProjectConfig
+	ensureProjDir string
+)
+
 // ensureResult is the structured output for the ensure command.
 // REQ-002-026
 type ensureResult struct {
@@ -56,18 +68,17 @@ type ensureResult struct {
 // runEnsure executes the ensure command.
 // REQ-002-024: Creates VM if not found, starts if stopped, no-ops if running.
 // REQ-002-027: When VM exists, does NOT re-provision or change config.
+// REQ-005-021: When no name arg, read .sd.yaml from CWD.
 func runEnsure(cmd *cobra.Command, args []string) error {
 	f := Formatter()
 	if f == nil {
 		f = ui.NewFormatter(false)
 	}
 
-	name := args[0]
-	if name == "" {
-		return ui.CLIError{
-			Code:    "invalid_argument",
-			Message: "VM name must not be empty",
-		}
+	// REQ-005-021: When no positional arg, read .sd.yaml for project config
+	name, projCfg, projDir, err := resolveCreateName(args)
+	if err != nil {
+		return err
 	}
 
 	// REQ-001-006: validate VM name format
@@ -78,11 +89,19 @@ func runEnsure(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve backend name: flag > per-VM config > global default
+	// Resolve backend name: flag > .sd.yaml > per-VM config > global default
+	// REQ-005-022: CLI flags override .sd.yaml values
 	backendName, _ := cmd.Flags().GetString("backend")
+	if backendName == "" && projCfg != nil && projCfg.Backend != "" {
+		backendName = projCfg.Backend
+	}
 	if backendName == "" {
 		backendName = resolveBackendName(name)
 	}
+
+	// Store project config for use by ensureCreate
+	ensureProjCfg = projCfg
+	ensureProjDir = projDir
 
 	b, err := getBackendFunc(backendName)
 	if err != nil {
@@ -150,8 +169,9 @@ func ensureCreate(cmd *cobra.Command, f *ui.Formatter, b backend.Backend, name, 
 		return err
 	}
 
-	// Build VMConfig from flags and config defaults
-	vmCfg := buildVMConfig(cmd, backendName)
+	// Build VMConfig from flags, project config, and config defaults
+	// REQ-005-022: Precedence: CLI flags > .sd.yaml > user config > defaults
+	vmCfg := buildVMConfig(cmd, backendName, ensureProjCfg, ensureProjDir)
 
 	// Validate mount specs early
 	for _, m := range vmCfg.Mounts {
@@ -172,7 +192,7 @@ func ensureCreate(cmd *cobra.Command, f *ui.Formatter, b backend.Backend, name, 
 		}
 	}
 
-	modulesFlag, _ := cmd.Flags().GetStringSlice("modules")
+	modulesFlag := resolveModules(cmd, ensureProjCfg)
 	if err := doCreateVM(cmd.Context(), f, b, name, backendName, vmCfg, modulesFlag); err != nil {
 		return err
 	}

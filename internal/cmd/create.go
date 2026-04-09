@@ -26,12 +26,16 @@ var captureHostKey = ssh.CaptureHostKey
 
 func init() {
 	createCmd := &cobra.Command{
-		Use:   "create <name>",
+		Use:   "create [name]",
 		Short: "Create a new VM with the given name",
 		Long: `Create a new VM environment for running AI coding agents.
-The VM is provisioned using the configured backend (default: lima).`,
+The VM is provisioned using the configured backend (default: lima).
+
+When no name is given, reads .sd.yaml from the current directory (or parent
+directories) for project configuration including VM name, resources, modules,
+and mounts.`,
 		GroupID: "vm",
-		Args:    exactArgs(1, "<name> [flags]"),
+		Args:    rangeArgs(0, 1, "[name] [flags]"),
 		RunE:    runCreate,
 	}
 
@@ -49,19 +53,17 @@ The VM is provisioned using the configured backend (default: lima).`,
 }
 
 // runCreate executes the create command.
-// REQ-002-003
+// REQ-002-003, REQ-005-021
 func runCreate(cmd *cobra.Command, args []string) error {
 	f := Formatter()
 	if f == nil {
 		f = ui.NewFormatter(false)
 	}
 
-	name := args[0]
-	if name == "" {
-		return ui.CLIError{
-			Code:    "invalid_argument",
-			Message: "VM name must not be empty",
-		}
+	// REQ-005-021: When no positional arg, read .sd.yaml for project config
+	name, projCfg, projDir, err := resolveCreateName(args)
+	if err != nil {
+		return err
 	}
 
 	// REQ-001-006: validate VM name format
@@ -72,8 +74,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve backend name: flag > config > default ("lima")
+	// Resolve backend name: flag > .sd.yaml > config > default ("lima")
+	// REQ-005-022: CLI flags override .sd.yaml values
 	backendName, _ := cmd.Flags().GetString("backend")
+	if backendName == "" && projCfg != nil && projCfg.Backend != "" {
+		backendName = projCfg.Backend
+	}
 	if backendName == "" && Loader() != nil {
 		cfg := Loader().Get()
 		backendName = cfg.Defaults.Backend
@@ -92,8 +98,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Build VMConfig from flags and config defaults
-	vmCfg := buildVMConfig(cmd, backendName)
+	// Build VMConfig from flags, project config, and config defaults
+	// REQ-005-022: Precedence: CLI flags > .sd.yaml > user config > defaults
+	vmCfg := buildVMConfig(cmd, backendName, projCfg, projDir)
 
 	// Validate mount specs early
 	for _, m := range vmCfg.Mounts {
@@ -184,7 +191,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	modulesFlag, _ := cmd.Flags().GetStringSlice("modules")
+	modulesFlag := resolveModules(cmd, projCfg)
 	if err := doCreateVM(cmd.Context(), f, b, name, backendName, vmCfg, modulesFlag); err != nil {
 		return err
 	}
@@ -416,15 +423,16 @@ func runCreateProvision(ctx context.Context, f *ui.Formatter, b backend.Backend,
 	return &result
 }
 
-// buildVMConfig constructs a backend.VMConfig from CLI flags and config defaults.
-// REQ-002-003
-func buildVMConfig(cmd *cobra.Command, backendName string) backend.VMConfig {
-	// Start with config defaults
+// buildVMConfig constructs a backend.VMConfig from CLI flags, project config, and config defaults.
+// REQ-002-003, REQ-005-022: Precedence: CLI flags > .sd.yaml > user config > defaults
+func buildVMConfig(cmd *cobra.Command, backendName string, projCfg *config.ProjectConfig, projDir string) backend.VMConfig {
+	// Start with built-in defaults
 	cfgCPUs := 4
 	cfgMemory := "8GiB"
 	cfgDisk := "100GiB"
 	cfgImage := "ubuntu:24.04"
 
+	// Layer 1: user config (~/.sd/config.yaml) overrides built-in defaults
 	if Loader() != nil {
 		cfg := Loader().Get()
 		if cfg.Defaults.CPUs > 0 {
@@ -441,7 +449,20 @@ func buildVMConfig(cmd *cobra.Command, backendName string) backend.VMConfig {
 		}
 	}
 
-	// Override with flags if set
+	// Layer 2: .sd.yaml overrides user config
+	if projCfg != nil {
+		if projCfg.CPUs > 0 {
+			cfgCPUs = projCfg.CPUs
+		}
+		if projCfg.Memory != "" {
+			cfgMemory = projCfg.Memory
+		}
+		if projCfg.Disk != "" {
+			cfgDisk = projCfg.Disk
+		}
+	}
+
+	// Layer 3: CLI flags override .sd.yaml
 	cpus, _ := cmd.Flags().GetInt("cpus")
 	if cpus <= 0 {
 		cpus = cfgCPUs
@@ -456,22 +477,39 @@ func buildVMConfig(cmd *cobra.Command, backendName string) backend.VMConfig {
 	}
 
 	// Parse mount specs: host:guest[:mode]
+	// CLI mounts take precedence; if none specified, use .sd.yaml mounts
 	var mounts []backend.Mount
 	mountSpecs, _ := cmd.Flags().GetStringArray("mount")
-	for _, spec := range mountSpecs {
-		if spec == "" {
-			continue
+	if len(mountSpecs) == 0 && projCfg != nil && len(projCfg.Mounts) > 0 {
+		// Resolve "." and relative paths relative to .sd.yaml location
+		resolved := config.ResolveMountPaths(projCfg.Mounts, projDir)
+		for _, spec := range resolved {
+			if spec == "" {
+				continue
+			}
+			m := parseMountSpec(spec)
+			mounts = append(mounts, m)
 		}
-		m := parseMountSpec(spec)
-		mounts = append(mounts, m)
+	} else {
+		for _, spec := range mountSpecs {
+			if spec == "" {
+				continue
+			}
+			m := parseMountSpec(spec)
+			mounts = append(mounts, m)
+		}
 	}
 
 	// Collect egress domains
 	var egress []string
 	egressFlags, _ := cmd.Flags().GetStringArray("allow-egress")
-	for _, domain := range egressFlags {
-		if domain != "" {
-			egress = append(egress, domain)
+	if len(egressFlags) == 0 && projCfg != nil && len(projCfg.AllowEgress) > 0 {
+		egress = projCfg.AllowEgress
+	} else {
+		for _, domain := range egressFlags {
+			if domain != "" {
+				egress = append(egress, domain)
+			}
 		}
 	}
 
@@ -489,6 +527,66 @@ func buildVMConfig(cmd *cobra.Command, backendName string) backend.VMConfig {
 		Mounts:    mounts,
 		EnvVars:   make(map[string]string),
 	}
+}
+
+// getWorkingDir returns the current working directory. Overridable for testing.
+var getWorkingDir = os.Getwd
+
+// resolveCreateName determines the VM name from args or .sd.yaml.
+// REQ-005-021: When no positional arg, read .sd.yaml from CWD.
+func resolveCreateName(args []string) (name string, projCfg *config.ProjectConfig, projDir string, err error) {
+	if len(args) > 0 && args[0] != "" {
+		// Explicit name provided -- still try to load .sd.yaml for other settings
+		name = args[0]
+		cwd, cwdErr := getWorkingDir()
+		if cwdErr == nil {
+			configPath, cfg, findErr := config.FindProjectConfig(cwd)
+			if findErr == nil && cfg != nil {
+				projCfg = cfg
+				projDir = filepath.Dir(configPath)
+			}
+		}
+		return name, projCfg, projDir, nil
+	}
+
+	// No positional arg -- .sd.yaml is required
+	cwd, err := getWorkingDir()
+	if err != nil {
+		return "", nil, "", ui.CLIError{
+			Code:    "cwd_unavailable",
+			Message: fmt.Sprintf("cannot determine current directory: %v", err),
+		}
+	}
+
+	configPath, cfg, findErr := config.FindProjectConfig(cwd)
+	if findErr != nil {
+		return "", nil, "", ui.CLIError{
+			Code:    "project_config_invalid",
+			Message: findErr.Error(),
+		}
+	}
+	if cfg == nil {
+		return "", nil, "", ui.CLIError{
+			Code:    "missing_vm_name",
+			Message: "missing VM name -- provide a name or create .sd.yaml",
+		}
+	}
+
+	return cfg.Name, cfg, filepath.Dir(configPath), nil
+}
+
+// resolveModules determines which modules to use.
+// CLI flags take precedence over .sd.yaml modules.
+// REQ-005-022
+func resolveModules(cmd *cobra.Command, projCfg *config.ProjectConfig) []string {
+	modulesFlag, _ := cmd.Flags().GetStringSlice("modules")
+	if len(modulesFlag) > 0 {
+		return modulesFlag
+	}
+	if projCfg != nil && len(projCfg.Modules) > 0 {
+		return projCfg.Modules
+	}
+	return nil
 }
 
 // parseMountSpec parses a mount specification string host:guest[:mode].

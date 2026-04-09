@@ -143,10 +143,14 @@ func TestCreateCommand_ActionableError(t *testing.T) {
 	cmd, _, err := root.Find([]string{"create"})
 	require.NoError(t, err)
 
+	// REQ-005-021: 0 args is accepted at args layer (name comes from .sd.yaml)
 	err = cmd.Args(cmd, nil)
+	assert.NoError(t, err, "create accepts 0 args since .sd.yaml may provide name")
+
+	// 2 args is still rejected
+	err = cmd.Args(cmd, []string{"a", "b"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required argument(s)")
-	assert.Contains(t, err.Error(), "<name>")
 }
 
 func TestExecCommand_ActionableError(t *testing.T) {

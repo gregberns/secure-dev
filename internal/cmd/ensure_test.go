@@ -100,15 +100,22 @@ func TestEnsureCommand_AliasUp_Functional(t *testing.T) {
 	assert.Equal(t, backend.StatusRunning, status)
 }
 
-func TestEnsureCommand_ExactArgs(t *testing.T) {
+func TestEnsureCommand_RangeArgs(t *testing.T) {
 	newRootTestEnv(t)
 	root := RootCmd()
 
 	cmd, _, err := root.Find([]string{"ensure"})
 	require.NoError(t, err)
 	assert.NotNil(t, cmd.Args, "ensure must have an Args validator")
+	// REQ-005-021: 0 args is now valid at the args layer (name resolved from .sd.yaml)
 	err = cmd.Args(cmd, nil)
-	assert.Error(t, err, "ensure must reject zero args")
+	assert.NoError(t, err, "ensure must accept zero args (name resolved from .sd.yaml)")
+	// 1 arg is still valid
+	err = cmd.Args(cmd, []string{"test"})
+	assert.NoError(t, err, "ensure must accept one arg")
+	// 2 args is rejected
+	err = cmd.Args(cmd, []string{"a", "b"})
+	assert.Error(t, err, "ensure must reject two args")
 }
 
 func TestEnsureCommand_Flags(t *testing.T) {
@@ -411,10 +418,94 @@ func TestEnsureCommand_StatusCheckFails(t *testing.T) {
 }
 
 func TestEnsureCommand_MissingName(t *testing.T) {
-	newRootTestEnv(t)
+	dir := newRootTestEnv(t)
+
+	// Ensure CWD has no .sd.yaml
+	origGetWD := getWorkingDir
+	getWorkingDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { getWorkingDir = origGetWD })
 
 	root := RootCmd()
 	root.SetArgs([]string{"ensure"})
 	err := root.Execute()
 	assert.Error(t, err, "ensure without name must fail")
+	assert.Contains(t, err.Error(), "missing VM name")
+}
+
+// --- .sd.yaml project config integration tests ---
+
+func TestEnsureCommand_SDYaml_CreatesVM(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	sdYaml := "name: yaml-ensure-vm\n"
+	require.NoError(t, os.WriteFile(dir+"/.sd.yaml", []byte(sdYaml), 0644))
+
+	origGetWD := getWorkingDir
+	getWorkingDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { getWorkingDir = origGetWD })
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure"})
+	err := root.Execute()
+	require.NoError(t, err)
+
+	// VM should be created with the .sd.yaml name
+	status, sErr := mb.Status(ctx, "yaml-ensure-vm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusRunning, status)
+}
+
+func TestEnsureCommand_SDYaml_StartsIfStopped(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	// Pre-create and stop the VM
+	require.NoError(t, mb.Create(ctx, "yaml-stopped", backend.VMConfig{}))
+	require.NoError(t, mb.Stop(ctx, "yaml-stopped"))
+
+	dir := t.TempDir()
+	sdYaml := "name: yaml-stopped\n"
+	require.NoError(t, os.WriteFile(dir+"/.sd.yaml", []byte(sdYaml), 0644))
+
+	origGetWD := getWorkingDir
+	getWorkingDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { getWorkingDir = origGetWD })
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure"})
+	err := root.Execute()
+	require.NoError(t, err)
+
+	// VM should be running
+	status, sErr := mb.Status(ctx, "yaml-stopped")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusRunning, status)
+}
+
+func TestEnsureCommand_SDYaml_NoopIfRunning(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	// Pre-create the VM (memory backend starts in Running state)
+	require.NoError(t, mb.Create(ctx, "yaml-running", backend.VMConfig{}))
+
+	dir := t.TempDir()
+	sdYaml := "name: yaml-running\n"
+	require.NoError(t, os.WriteFile(dir+"/.sd.yaml", []byte(sdYaml), 0644))
+
+	origGetWD := getWorkingDir
+	getWorkingDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { getWorkingDir = origGetWD })
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure"})
+	err := root.Execute()
+	require.NoError(t, err)
+
+	// VM should still be running
+	status, sErr := mb.Status(ctx, "yaml-running")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusRunning, status)
 }
