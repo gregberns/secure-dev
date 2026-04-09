@@ -64,7 +64,7 @@ credential injection, and session management.`,
 				"doctor": true, "list": true, "status": true,
 				"connect": true, "ssh-config": true, "sync": true,
 				"audit": true, "config": true, "provision": true, "security": true,
-				"logs": true, "token": true, "diff": true,
+				"logs": true, "token": true, "diff": true, "guide": true,
 			}
 			for c := cmd; c != nil; c = c.Parent() {
 				if noConfigCmds[c.Name()] {
@@ -138,7 +138,9 @@ func init() {
 	cobra.EnablePrefixMatching = true
 
 	// REQ-002-002: Command groups
+	// REQ-002-023: "Getting Started" appears first so agents discover sd guide
 	rootCmd.AddGroup(
+		&cobra.Group{ID: "start", Title: "Getting Started"},
 		&cobra.Group{ID: "vm", Title: "VM Management"},
 		&cobra.Group{ID: "connection", Title: "Connection"},
 		&cobra.Group{ID: "config", Title: "Configuration"},
