@@ -610,6 +610,231 @@ func TestProperty_SSHConfig_VSOCKHasProxyCommand_TCPHasPort(t *testing.T) {
 	})
 }
 
+// --- Format flag tests ---
+
+func TestSSHConfigCommand_FormatJSON(t *testing.T) {
+	// --format=json without --json outputs raw JSON (no ok/data envelope)
+	setupSSHConfigMemoryTest(t, []string{"myvm"})
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"ssh-config", "myvm", "--format=json"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var data map[string]any
+	err = json.Unmarshal(buf.Bytes(), &data)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.Equal(t, "sd-myvm", data["host"])
+	assert.Equal(t, "127.0.0.1", data["hostname"])
+	assert.Equal(t, float64(memPortFromName("myvm")), data["port"])
+	assert.Equal(t, "ubuntu", data["user"])
+	assert.Equal(t, "/dev/null", data["identity_file"])
+	assert.Equal(t, "tcp", data["transport"])
+}
+
+func TestSSHConfigCommand_FormatJSON_WithGlobalJSON(t *testing.T) {
+	// --json --format=json wraps in {ok:true, data:...} envelope
+	setupSSHConfigMemoryTest(t, []string{"myvm"})
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "ssh-config", "myvm", "--format=json"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "sd-myvm", data["host"])
+	assert.Equal(t, "127.0.0.1", data["hostname"])
+	assert.Equal(t, "tcp", data["transport"])
+}
+
+func TestSSHConfigCommand_FormatVSCode(t *testing.T) {
+	setupSSHConfigMemoryTest(t, []string{"myvm"})
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"ssh-config", "myvm", "--format=vscode"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	output := buf.String()
+	// Should be valid JSON snippet
+	var result map[string]any
+	err = json.Unmarshal([]byte(output), &result)
+	require.NoError(t, err, "vscode format must be valid JSON: %s", output)
+
+	assert.Equal(t, "sd-myvm", result["host"])
+	assert.Contains(t, result, "ssh.remotePlatform")
+	assert.Contains(t, result, "remote.SSH.configFile")
+
+	platformMap := result["ssh.remotePlatform"].(map[string]any)
+	assert.Equal(t, "linux", platformMap["sd-myvm"])
+	assert.Equal(t, "~/.ssh/config", result["remote.SSH.configFile"])
+}
+
+func TestSSHConfigCommand_FormatVSCode_JSON(t *testing.T) {
+	setupSSHConfigMemoryTest(t, []string{"myvm"})
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "ssh-config", "myvm", "--format=vscode"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "sd-myvm", data["host"])
+	assert.Contains(t, data, "ssh.remotePlatform")
+	assert.Contains(t, data, "remote.SSH.configFile")
+}
+
+func TestSSHConfigCommand_FormatSSH_Default(t *testing.T) {
+	// --format=ssh should behave identically to no format flag
+	setupSSHConfigMemoryTest(t, []string{"myvm"})
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"ssh-config", "myvm", "--format=ssh"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	output := buf.String()
+	assert.Contains(t, output, "Host sd-myvm")
+	assert.Contains(t, output, "HostName 127.0.0.1")
+	assert.Contains(t, output, "# Managed by sd. Do not edit manually.")
+}
+
+func TestSSHConfigCommand_FormatInvalid(t *testing.T) {
+	setupSSHConfigMemoryTest(t, []string{"myvm"})
+
+	root := RootCmd()
+	root.SetArgs([]string{"ssh-config", "myvm", "--format=yaml"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "invalid_argument", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "yaml")
+}
+
+func TestSSHConfigCommand_FormatJSON_AllFields(t *testing.T) {
+	// Verify all required fields are present in --format=json output (raw, no envelope)
+	setupSSHConfigMemoryTest(t, []string{"myvm"})
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"ssh-config", "myvm", "--format=json"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var data map[string]any
+	err = json.Unmarshal(buf.Bytes(), &data)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	requiredFields := []string{"host", "hostname", "port", "user", "identity_file", "transport"}
+	for _, field := range requiredFields {
+		assert.Contains(t, data, field, "JSON output must contain %q field", field)
+	}
+}
+
+// --- Unit test for formatVSCodeConfig ---
+
+func TestFormatVSCodeConfig(t *testing.T) {
+	result := formatVSCodeConfig("my-project")
+	assert.Equal(t, "sd-my-project", result.Host)
+	assert.Equal(t, "linux", result.SSHRemotePlatform["sd-my-project"])
+	assert.Equal(t, "~/.ssh/config", result.RemoteSSHConfig)
+}
+
+func TestFormatVSCodeConfig_HostPrefix(t *testing.T) {
+	names := []string{"test", "my-vm", "production"}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			result := formatVSCodeConfig(name)
+			assert.Equal(t, "sd-"+name, result.Host)
+			assert.Contains(t, result.SSHRemotePlatform, "sd-"+name)
+		})
+	}
+}
+
 // Property: ForwardAgent and ForwardX11 are always "no".
 func TestProperty_SSHConfig_ForwardAgentAndX11AlwaysNo(t *testing.T) {
 	configs := []struct {

@@ -458,7 +458,7 @@ func TestProvisionList_JSONOutput(t *testing.T) {
 	assert.True(t, result["ok"].(bool))
 
 	data := result["data"].([]interface{})
-	assert.GreaterOrEqual(t, len(data), 10, "should have at least 10 built-in modules")
+	assert.GreaterOrEqual(t, len(data), 12, "should have at least 12 built-in modules")
 
 	first := data[0].(map[string]interface{})
 	assert.Contains(t, first, "name")

@@ -1,0 +1,37 @@
+name: codex
+description: "OpenAI Codex CLI (via nvm and npm)"
+depends_on:
+  - base
+scripts:
+  - mode: user
+    script: |
+      if command -v codex >/dev/null 2>&1; then
+        echo "Codex CLI already installed: $(codex --version 2>/dev/null || echo 'unknown')"
+        exit 0
+      fi
+      # Install nvm if not present
+      export NVM_DIR="$HOME/.nvm"
+      if [ ! -d "$NVM_DIR" ]; then
+        curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh" -o /tmp/nvm-install.sh
+        echo "4b6a3b68a870ebd3f22993b1adee92c19eb059609a36e26be57d7a774dbe6e57  /tmp/nvm-install.sh" | sha256sum -c -
+        bash /tmp/nvm-install.sh
+        rm -f /tmp/nvm-install.sh
+      fi
+      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+      # Install latest LTS Node.js
+      nvm install --lts
+      nvm use --lts
+      # Install OpenAI Codex CLI globally
+      npm install -g @openai/codex
+  - mode: user
+    script: |
+      # Ensure nvm is sourced in shell config
+      NVM_LINE='[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"'
+      grep -q 'nvm.sh' ~/.profile 2>/dev/null || echo "$NVM_LINE" >> ~/.profile
+      grep -q 'nvm.sh' ~/.bashrc 2>/dev/null || echo "$NVM_LINE" >> ~/.bashrc
+checksums:
+  nvm-install.sh: "4b6a3b68a870ebd3f22993b1adee92c19eb059609a36e26be57d7a774dbe6e57"
+probe:
+  command: "command -v codex"
+  interval: 5s
+  timeout: 5m

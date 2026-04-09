@@ -227,6 +227,8 @@ var BuiltinModuleNames = []string{
 	"dns-filter",
 	"egress",
 	"claude-code",
+	"codex",
+	"gemini-cli",
 	"docker",
 	"golang",
 	"rust",

@@ -21,13 +21,13 @@ func TestLoadBuiltinModules_AllPresent(t *testing.T) {
 	for i, m := range modules {
 		names[i] = m.Name
 	}
-	assert.Equal(t, BuiltinModuleNames, names, "all 10 built-in modules must be present in canonical order")
+	assert.Equal(t, BuiltinModuleNames, names, "all 12 built-in modules must be present in canonical order")
 }
 
 func TestLoadBuiltinModules_Count(t *testing.T) {
 	modules, err := LoadBuiltinModules()
 	require.NoError(t, err)
-	assert.Len(t, modules, 10, "REQ-006-001 specifies exactly 10 built-in modules")
+	assert.Len(t, modules, 12, "REQ-006-001 specifies exactly 12 built-in modules")
 }
 
 func TestLoadBuiltinModules_AllValid(t *testing.T) {
@@ -236,6 +236,8 @@ func TestLoadBuiltinModules_DownloadModulesHaveChecksums(t *testing.T) {
 	requiresChecksums := map[string]bool{
 		"golang":      true,
 		"claude-code": true,
+		"codex":       true,
+		"gemini-cli":  true,
 		"rust":        true,
 		"github-cli":  true,
 	}
@@ -898,6 +900,176 @@ func TestLoadBuiltinModules_ResolveAllSucceeds(t *testing.T) {
 	assert.Equal(t, "base", resolved[0].Name, "base module must be first in execution order")
 }
 
+// --- Codex Module Tests ---
+
+func TestLoadBuiltinModules_CodexPresent(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var codex *Module
+	for i := range modules {
+		if modules[i].Name == "codex" {
+			codex = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, codex, "codex module must be present")
+	assert.Contains(t, codex.Description, "Codex")
+}
+
+func TestLoadBuiltinModules_CodexDependsOnBase(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var codex *Module
+	for i := range modules {
+		if modules[i].Name == "codex" {
+			codex = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, codex)
+	assert.Contains(t, codex.DependsOn, "base", "codex must depend on base")
+}
+
+func TestLoadBuiltinModules_CodexInstallsNodeAndCodex(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var codex *Module
+	for i := range modules {
+		if modules[i].Name == "codex" {
+			codex = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, codex)
+
+	allScripts := ""
+	for _, s := range codex.Scripts {
+		allScripts += s.Script + " "
+	}
+
+	assert.Contains(t, allScripts, "nvm", "codex must install Node.js via nvm")
+	assert.Contains(t, allScripts, "@openai/codex", "codex must install OpenAI Codex CLI")
+}
+
+func TestLoadBuiltinModules_CodexHasProbe(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var codex *Module
+	for i := range modules {
+		if modules[i].Name == "codex" {
+			codex = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, codex)
+	assert.NotNil(t, codex.Probe, "codex must have a readiness probe")
+	assert.Contains(t, codex.Probe.Command, "codex", "codex probe must check for codex binary")
+}
+
+func TestLoadBuiltinModules_CodexHasChecksums(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var codex *Module
+	for i := range modules {
+		if modules[i].Name == "codex" {
+			codex = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, codex)
+	assert.NotEmpty(t, codex.Checksums, "codex module must have checksums for downloads")
+}
+
+// --- Gemini CLI Module Tests ---
+
+func TestLoadBuiltinModules_GeminiCliPresent(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var gemini *Module
+	for i := range modules {
+		if modules[i].Name == "gemini-cli" {
+			gemini = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, gemini, "gemini-cli module must be present")
+	assert.Contains(t, gemini.Description, "Gemini")
+}
+
+func TestLoadBuiltinModules_GeminiCliDependsOnBase(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var gemini *Module
+	for i := range modules {
+		if modules[i].Name == "gemini-cli" {
+			gemini = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, gemini)
+	assert.Contains(t, gemini.DependsOn, "base", "gemini-cli must depend on base")
+}
+
+func TestLoadBuiltinModules_GeminiCliInstallsNodeAndGemini(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var gemini *Module
+	for i := range modules {
+		if modules[i].Name == "gemini-cli" {
+			gemini = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, gemini)
+
+	allScripts := ""
+	for _, s := range gemini.Scripts {
+		allScripts += s.Script + " "
+	}
+
+	assert.Contains(t, allScripts, "nvm", "gemini-cli must install Node.js via nvm")
+	assert.Contains(t, allScripts, "gemini-cli", "gemini-cli must install Gemini CLI")
+}
+
+func TestLoadBuiltinModules_GeminiCliHasProbe(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var gemini *Module
+	for i := range modules {
+		if modules[i].Name == "gemini-cli" {
+			gemini = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, gemini)
+	assert.NotNil(t, gemini.Probe, "gemini-cli must have a readiness probe")
+	assert.Contains(t, gemini.Probe.Command, "gemini", "gemini-cli probe must check for gemini binary")
+}
+
+func TestLoadBuiltinModules_GeminiCliHasChecksums(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	var gemini *Module
+	for i := range modules {
+		if modules[i].Name == "gemini-cli" {
+			gemini = &modules[i]
+			break
+		}
+	}
+	require.NotNil(t, gemini)
+	assert.NotEmpty(t, gemini.Checksums, "gemini-cli module must have checksums for downloads")
+}
+
 func TestLoadBuiltinModules_ResolveSingleModule(t *testing.T) {
 	// REQ-006-002: requesting any module also includes base
 	modules, err := LoadBuiltinModules()
@@ -910,6 +1082,8 @@ func TestLoadBuiltinModules_ResolveSingleModule(t *testing.T) {
 		{"golang", "base", "golang"},
 		{"docker", "base", "docker"},
 		{"claude-code", "base", "claude-code"},
+		{"codex", "base", "codex"},
+		{"gemini-cli", "base", "gemini-cli"},
 		{"rust", "base", "rust"},
 		{"python", "base", "python"},
 		{"github-cli", "base", "github-cli"},
@@ -936,8 +1110,8 @@ func TestProperty_LoadBuiltinModules_AlwaysSucceeds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadBuiltinModules should never fail: %v", err)
 		}
-		if len(modules) != 10 {
-			t.Fatalf("expected 10 modules, got %d", len(modules))
+		if len(modules) != 12 {
+			t.Fatalf("expected 12 modules, got %d", len(modules))
 		}
 	})
 }

@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -19,14 +20,19 @@ func init() {
 The output can be appended to ~/.ssh/config or piped to other commands.
 
 Use --json to output the config fields as a structured JSON object.
+Use --format to select output format: ssh (default), json, or vscode.
 
 Examples:
-  sd ssh-config myvm              # Print SSH config fragment
-  sd ssh-config myvm --json       # Output config as JSON`,
+  sd ssh-config myvm                  # Print SSH config fragment
+  sd ssh-config myvm --json           # Output config as JSON
+  sd ssh-config myvm --format=json    # JSON with all SSH details
+  sd ssh-config myvm --format=vscode  # VS Code Remote-SSH settings`,
 		GroupID: "connection",
 		Args:    exactArgs(1, "<vm-name>"),
 		RunE:    runSSHConfig,
 	}
+
+	sshConfigCmd.Flags().String("format", "ssh", "Output format: ssh, json, vscode")
 
 	rootCmd.AddCommand(sshConfigCmd)
 }
@@ -94,18 +100,31 @@ func runSSHConfig(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// REQ-007-006: JSON output
-	if f.JSONMode() {
-		type sshConfigResult struct {
-			Host         string `json:"host"`
-			HostName     string `json:"hostname"`
-			Port         int    `json:"port"`
-			User         string `json:"user"`
-			IdentityFile string `json:"identity_file"`
-			ProxyCommand string `json:"proxy_command,omitempty"`
-			Transport    string `json:"transport"`
+	// Determine output format: --format flag takes priority, --json implies json format
+	format, _ := cmd.Flags().GetString("format")
+	if format == "" {
+		format = "ssh"
+	}
+
+	// Validate format value
+	switch format {
+	case "ssh", "json", "vscode":
+		// valid
+	default:
+		return ui.CLIError{
+			Code:    "invalid_argument",
+			Message: fmt.Sprintf("unknown format %q: must be ssh, json, or vscode", format),
 		}
-		result := sshConfigResult{
+	}
+
+	// --json global flag implies json format
+	if f.JSONMode() && format == "ssh" {
+		format = "json"
+	}
+
+	switch format {
+	case "json":
+		result := sshConfigJSONResult{
 			Host:         "sd-" + name,
 			HostName:     sshCfg.Host,
 			Port:         sshCfg.Port,
@@ -114,8 +133,30 @@ func runSSHConfig(cmd *cobra.Command, args []string) error {
 			ProxyCommand: sshCfg.ProxyCommand,
 			Transport:    sshCfg.Transport,
 		}
-		f.SuccessData(result, nil)
-	} else {
+		if f.JSONMode() {
+			// --json wraps in {ok:true, data:...} envelope
+			f.SuccessData(result, nil)
+		} else {
+			// --format=json without --json: output raw JSON
+			jsonBytes, _ := json.MarshalIndent(result, "", "  ")
+			f.SuccessData(nil, func() string {
+				return string(jsonBytes) + "\n"
+			})
+		}
+
+	case "vscode":
+		result := formatVSCodeConfig(name)
+		if f.JSONMode() {
+			f.SuccessData(result, nil)
+		} else {
+			// Pretty-print the VS Code JSON snippet for human consumption
+			jsonBytes, _ := json.MarshalIndent(result, "", "  ")
+			f.SuccessData(nil, func() string {
+				return string(jsonBytes) + "\n"
+			})
+		}
+
+	default: // "ssh"
 		// REQ-007-006: Print SSH config fragment to stdout
 		f.SuccessData(nil, func() string {
 			return formatSSHConfigFragment(name, sshCfg)
@@ -123,6 +164,34 @@ func runSSHConfig(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// sshConfigJSONResult is the JSON output structure for ssh-config.
+type sshConfigJSONResult struct {
+	Host         string `json:"host"`
+	HostName     string `json:"hostname"`
+	Port         int    `json:"port"`
+	User         string `json:"user"`
+	IdentityFile string `json:"identity_file"`
+	ProxyCommand string `json:"proxy_command,omitempty"`
+	Transport    string `json:"transport"`
+}
+
+// vsCodeConfig represents VS Code Remote-SSH settings snippet.
+type vsCodeConfig struct {
+	Host              string            `json:"host"`
+	SSHRemotePlatform map[string]string `json:"ssh.remotePlatform"`
+	RemoteSSHConfig   string            `json:"remote.SSH.configFile"`
+}
+
+// formatVSCodeConfig produces a VS Code Remote-SSH settings JSON snippet.
+func formatVSCodeConfig(vmName string) vsCodeConfig {
+	host := "sd-" + vmName
+	return vsCodeConfig{
+		Host:              host,
+		SSHRemotePlatform: map[string]string{host: "linux"},
+		RemoteSSHConfig:   "~/.ssh/config",
+	}
 }
 
 // formatSSHConfigFragment produces an SSH config fragment for a VM.
