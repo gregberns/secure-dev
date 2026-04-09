@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
 	"sd/internal/backend/memory"
+	"sd/internal/config"
 	"sd/internal/ui"
 )
 
@@ -418,6 +419,79 @@ func TestStatusCommand_ErrorStatusVM(t *testing.T) {
 
 	data := result["data"].(map[string]any)
 	assert.Equal(t, "error", data["status"])
+}
+
+// TestStatusCommand_PerVMBackend verifies that the status command reads
+// the per-VM config to determine the correct backend.
+func TestStatusCommand_PerVMBackend(t *testing.T) {
+	tmpDir := newRootTestEnv(t)
+
+	// Create two memory backends representing lima and docker
+	mbLima := memory.New()
+	mbDocker := memory.New()
+	ctx := context.Background()
+
+	// Create a VM in the "docker" backend
+	require.NoError(t, mbDocker.Create(ctx, "docker-vm", backend.VMConfig{
+		CPUs: 2, Memory: "4GiB", Disk: "50GiB",
+	}))
+
+	origGetBackend := getBackendFunc
+	getBackendFunc = func(name string) (backend.Backend, error) {
+		switch name {
+		case "lima":
+			return mbLima, nil
+		case "docker":
+			return mbDocker, nil
+		}
+		return nil, fmt.Errorf("unknown backend %q", name)
+	}
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		mbLima.Reset()
+		mbDocker.Reset()
+	})
+
+	// Write a per-VM config with backend=docker
+	l := config.NewLoader(config.WithSDHome(tmpDir))
+	require.NoError(t, l.Load())
+	require.NoError(t, l.WriteVMConfig(&config.VMConfig{
+		Name:    "docker-vm",
+		Backend: "docker",
+		CPUs:    2,
+		Memory:  "4GiB",
+		Disk:    "50GiB",
+	}))
+	oldLoader := loader
+	loader = l
+	t.Cleanup(func() { loader = oldLoader })
+
+	// Run status -- it should use the docker backend, not lima
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "status", "docker-vm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "docker-vm", data["name"])
+	assert.Equal(t, "running", data["status"])
 }
 
 // --- Format helper tests ---

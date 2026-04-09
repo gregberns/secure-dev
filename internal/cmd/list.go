@@ -26,6 +26,27 @@ func defaultGetBackend(name string) (backend.Backend, error) {
 	return backend.Get(name)
 }
 
+// resolveBackendName returns the backend name for a specific VM by reading
+// its per-VM config from $SD_HOME/vms/<name>/config.yaml. Falls back to the
+// global default backend if no per-VM config exists or the backend field is empty.
+func resolveBackendName(vmName string) string {
+	if l := Loader(); l != nil {
+		if vmCfg, err := l.ReadVMConfig(vmName); err == nil && vmCfg.Backend != "" {
+			return vmCfg.Backend
+		}
+		// Fall back to global default
+		cfg := l.Get()
+		if cfg.Defaults.Backend != "" {
+			return cfg.Defaults.Backend
+		}
+	}
+	return "lima"
+}
+
+// allBackendNames returns the names of all registered backends.
+// Overridden in tests to control which backends are queried.
+var allBackendNames = backend.List
+
 func init() {
 	listCmd := &cobra.Command{
 		Use:     "list",
@@ -47,26 +68,28 @@ func runList(cmd *cobra.Command, args []string) error {
 		f = ui.NewFormatter(false)
 	}
 
-	// Determine backend name from config
-	var backendName string
-	if l := Loader(); l != nil {
-		cfg := l.Get()
-		backendName = cfg.Defaults.Backend
-	}
+	// Query all registered backends and merge results.
+	var vms []backend.VMInfo
+	seen := make(map[string]bool)
 
-	b, err := getBackendFunc(backendName)
-	if err != nil {
-		return ui.CLIError{
-			Code:    "backend_unavailable",
-			Message: fmt.Sprintf("no available backend: %v", err),
+	for _, name := range allBackendNames() {
+		b, err := getBackendFunc(name)
+		if err != nil {
+			continue // skip backends that can't be loaded
 		}
-	}
-
-	vms, err := b.List(cmd.Context())
-	if err != nil {
-		return ui.CLIError{
-			Code:    "backend_unavailable",
-			Message: fmt.Sprintf("failed to list VMs: %v", err),
+		if err := b.Available(); err != nil {
+			continue // skip unavailable backends
+		}
+		bvms, err := b.List(cmd.Context())
+		if err != nil {
+			f.Progress(fmt.Sprintf("Warning: failed to list VMs from backend %q: %v", name, err))
+			continue
+		}
+		for _, vm := range bvms {
+			if !seen[vm.Name] {
+				seen[vm.Name] = true
+				vms = append(vms, vm)
+			}
 		}
 	}
 

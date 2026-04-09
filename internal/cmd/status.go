@@ -39,14 +39,18 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		f = ui.NewFormatter(false)
 	}
 
-	// Resolve backend name: config > default ("lima")
-	backendName := ""
-	if Loader() != nil {
-		cfg := Loader().Get()
-		backendName = cfg.Defaults.Backend
-	}
-	if backendName == "" {
-		backendName = "lima"
+	// Resolve backend: use per-VM config for named VM, global default otherwise.
+	var backendName string
+	if len(args) > 0 && args[0] != "" {
+		backendName = resolveBackendName(args[0])
+	} else {
+		if Loader() != nil {
+			cfg := Loader().Get()
+			backendName = cfg.Defaults.Backend
+		}
+		if backendName == "" {
+			backendName = "lima"
+		}
 	}
 
 	b, err := getBackendFunc(backendName)

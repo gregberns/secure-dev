@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sd/internal/backend"
 	"sd/internal/backend/memory"
+	"sd/internal/config"
 	"sd/internal/ui"
 )
 
@@ -27,10 +28,16 @@ func setupListTest(t *testing.T) *memory.Backend {
 
 	mb := memory.New()
 	origGetBackend := getBackendFunc
+	origAllBackendNames := allBackendNames
 	getBackendFunc = func(_ string) (backend.Backend, error) {
 		return mb, nil
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend; mb.Reset() })
+	allBackendNames = func() []string { return []string{"memory"} }
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		allBackendNames = origAllBackendNames
+		mb.Reset()
+	})
 	return mb
 }
 
@@ -236,26 +243,58 @@ func TestListCommand_BackendError(t *testing.T) {
 	mb := setupListTest(t)
 	mb.SetMethodError("list", fmt.Errorf("limactl not found"))
 
+	// With multi-backend listing, a failing backend is skipped with a warning
+	// rather than causing the entire command to fail.
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
 	root := RootCmd()
 	root.SetArgs([]string{"list"})
-	err := root.Execute()
+	execErr := root.Execute()
 
-	assert.Error(t, err)
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	assert.NoError(t, execErr, "list should succeed even when a backend fails")
+	assert.Contains(t, buf.String(), "No VMs found")
 }
 
 func TestListCommand_BackendUnavailable(t *testing.T) {
 	newRootTestEnv(t)
 	origGetBackend := getBackendFunc
+	origAllBackendNames := allBackendNames
 	getBackendFunc = func(_ string) (backend.Backend, error) {
 		return nil, fmt.Errorf("no backends registered")
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend })
+	allBackendNames = func() []string { return []string{"missing"} }
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		allBackendNames = origAllBackendNames
+	})
+
+	// With multi-backend listing, unavailable backends are skipped.
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
 
 	root := RootCmd()
 	root.SetArgs([]string{"list"})
-	err := root.Execute()
+	execErr := root.Execute()
 
-	assert.Error(t, err)
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	assert.NoError(t, execErr, "list should succeed even when no backends are available")
+	assert.Contains(t, buf.String(), "No VMs found")
 }
 
 func TestListCommand_NoConfigRequired(t *testing.T) {
@@ -453,6 +492,128 @@ func TestProperty_DualModeConsistency(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestListCommand_MultipleBackends verifies that list queries all registered
+// backends and merges results.
+func TestListCommand_MultipleBackends(t *testing.T) {
+	newRootTestEnv(t)
+
+	mb1 := memory.New()
+	mb2 := memory.New()
+
+	ctx := context.Background()
+	require.NoError(t, mb1.Create(ctx, "lima-vm", backend.VMConfig{
+		CPUs: 4, Memory: "8GiB", Disk: "100GiB",
+	}))
+	require.NoError(t, mb2.Create(ctx, "docker-vm", backend.VMConfig{
+		CPUs: 2, Memory: "4GiB", Disk: "50GiB",
+	}))
+
+	origGetBackend := getBackendFunc
+	origAllBackendNames := allBackendNames
+	getBackendFunc = func(name string) (backend.Backend, error) {
+		switch name {
+		case "backend-a":
+			return mb1, nil
+		case "backend-b":
+			return mb2, nil
+		}
+		return nil, fmt.Errorf("unknown backend %q", name)
+	}
+	allBackendNames = func() []string { return []string{"backend-a", "backend-b"} }
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		allBackendNames = origAllBackendNames
+		mb1.Reset()
+		mb2.Reset()
+	})
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "list"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data, ok := result["data"].([]any)
+	require.True(t, ok, "data must be a JSON array")
+	require.Len(t, data, 2, "should see VMs from both backends")
+
+	// Verify both VMs are present
+	names := make(map[string]bool)
+	for _, vm := range data {
+		vmMap := vm.(map[string]any)
+		names[vmMap["name"].(string)] = true
+	}
+	assert.True(t, names["lima-vm"], "should contain lima-vm from backend-a")
+	assert.True(t, names["docker-vm"], "should contain docker-vm from backend-b")
+}
+
+// TestResolveBackendName_PerVMConfig verifies that resolveBackendName reads the
+// per-VM config and returns the stored backend name.
+func TestResolveBackendName_PerVMConfig(t *testing.T) {
+	tmpDir := newRootTestEnv(t)
+
+	// Create a loader pointing at our temp dir and write a VM config
+	l := config.NewLoader(config.WithSDHome(tmpDir))
+	require.NoError(t, l.Load())
+	require.NoError(t, l.WriteVMConfig(&config.VMConfig{
+		Name:    "docker-vm",
+		Backend: "docker",
+		CPUs:    2,
+		Memory:  "4GiB",
+		Disk:    "50GiB",
+	}))
+
+	// Set the global loader so resolveBackendName can find it
+	oldLoader := loader
+	loader = l
+	t.Cleanup(func() { loader = oldLoader })
+
+	// Verify that resolveBackendName reads the per-VM config
+	assert.Equal(t, "docker", resolveBackendName("docker-vm"))
+}
+
+// TestResolveBackendName_FallbackToGlobalDefault verifies that resolveBackendName
+// falls back to the global default when no per-VM config exists.
+func TestResolveBackendName_FallbackToGlobalDefault(t *testing.T) {
+	tmpDir := newRootTestEnv(t)
+
+	l := config.NewLoader(config.WithSDHome(tmpDir))
+	require.NoError(t, l.Load())
+
+	oldLoader := loader
+	loader = l
+	t.Cleanup(func() { loader = oldLoader })
+
+	// No VM config written - should fall back to global default ("lima")
+	assert.Equal(t, "lima", resolveBackendName("nonexistent-vm"))
+}
+
+// TestResolveBackendName_NoLoader verifies that resolveBackendName returns "lima"
+// when no config loader is available.
+func TestResolveBackendName_NoLoader(t *testing.T) {
+	oldLoader := loader
+	loader = nil
+	t.Cleanup(func() { loader = oldLoader })
+
+	assert.Equal(t, "lima", resolveBackendName("any-vm"))
 }
 
 // Benchmark: list command with many VMs.

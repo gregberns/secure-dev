@@ -53,15 +53,8 @@ func runStop(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve backend name: config > default ("lima")
-	backendName := ""
-	if Loader() != nil {
-		cfg := Loader().Get()
-		backendName = cfg.Defaults.Backend
-	}
-	if backendName == "" {
-		backendName = "lima"
-	}
+	// Resolve backend from per-VM config
+	backendName := resolveBackendName(name)
 
 	b, err := getBackendFunc(backendName)
 	if err != nil {
