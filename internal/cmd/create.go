@@ -184,12 +184,43 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	modulesFlag, _ := cmd.Flags().GetStringSlice("modules")
+	if err := doCreateVM(cmd.Context(), f, b, name, backendName, vmCfg, modulesFlag); err != nil {
+		return err
+	}
+
+	type createResult struct {
+		Name    string `json:"name"`
+		Backend string `json:"backend"`
+		CPUs    int    `json:"cpus"`
+		Memory  string `json:"memory"`
+		Disk    string `json:"disk"`
+	}
+
+	result := createResult{
+		Name:    name,
+		Backend: backendName,
+		CPUs:    vmCfg.CPUs,
+		Memory:  vmCfg.Memory,
+		Disk:    vmCfg.Disk,
+	}
+
+	f.SuccessData(result, func() string {
+		return fmt.Sprintf("VM %q created successfully.\n", name)
+	})
+	return nil
+}
+
+// doCreateVM handles the start+provision+persist+audit flow after a VM has been
+// created by the backend. Used by both 'sd create' and 'sd ensure'.
+// REQ-002-024
+func doCreateVM(ctx context.Context, f *ui.Formatter, b backend.Backend, name, backendName string, vmCfg backend.VMConfig, modules []string) error {
 	// REQ-001-006 step 4: Start the VM before provisioning.
 	// Lima's create only defines the VM config; start boots it.
 	f.Progress(fmt.Sprintf("Starting VM %q...", name))
-	if err := b.Start(cmd.Context(), name); err != nil {
+	if err := b.Start(ctx, name); err != nil {
 		// Start failed -- clean up the created-but-not-started VM
-		b.Destroy(cmd.Context(), name)
+		b.Destroy(ctx, name)
 		return ui.CLIError{
 			Code:    "vm_start_failed",
 			Message: fmt.Sprintf("failed to start VM %q after creation: %v", name, err),
@@ -206,27 +237,18 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if sdHome == "" {
 		sdHome = defaultSDHome()
 	}
-	setupSSH(cmd.Context(), f, b, name, sdHome)
+	setupSSH(ctx, f, b, name, sdHome)
 
 	// REQ-001-006 step 5: Run provisioning modules after VM creation.
-	modulesFlag, _ := cmd.Flags().GetStringSlice("modules")
-	provResult := runCreateProvision(cmd.Context(), f, b, name, modulesFlag)
+	provResult := runCreateProvision(ctx, f, b, name, modules)
 	if provResult != nil && provResult.Failed {
 		// Provisioning failed -- clean up the partially-created VM
 		f.Progress(fmt.Sprintf("Provisioning failed, cleaning up VM %q...", name))
-		b.Destroy(cmd.Context(), name)
+		b.Destroy(ctx, name)
 		return ui.CLIError{
 			Code:    "provision_script_failed",
 			Message: fmt.Sprintf("module %q failed: %s", provResult.Module, provResult.Error),
 		}
-	}
-
-	type createResult struct {
-		Name    string `json:"name"`
-		Backend string `json:"backend"`
-		CPUs    int    `json:"cpus"`
-		Memory  string `json:"memory"`
-		Disk    string `json:"disk"`
 	}
 
 	// REQ-001-006 step 6: Persist VM configuration
@@ -245,8 +267,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 				LastStarted: time.Now(),
 			},
 		}
-		if len(modulesFlag) > 0 {
-			vmConfigPersist.Provisions = modulesFlag
+		if len(modules) > 0 {
+			vmConfigPersist.Provisions = modules
 		}
 		if err := l.WriteVMConfig(vmConfigPersist); err != nil {
 			f.Progress(fmt.Sprintf("Warning: could not persist VM config: %v", err))
@@ -262,17 +284,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	result := createResult{
-		Name:    name,
-		Backend: backendName,
-		CPUs:    vmCfg.CPUs,
-		Memory:  vmCfg.Memory,
-		Disk:    vmCfg.Disk,
-	}
-
-	f.SuccessData(result, func() string {
-		return fmt.Sprintf("VM %q created successfully.\n", name)
-	})
 	return nil
 }
 

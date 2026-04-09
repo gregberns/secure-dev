@@ -1,0 +1,420 @@
+// Package cmd provides tests for the ensure command.
+// REQ-002-024: sd ensure <name> -- idempotent VM existence and running state
+// NOTE: Tests use global getBackendFunc -- do not use t.Parallel().
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"sd/internal/backend"
+	"sd/internal/backend/memory"
+	"sd/internal/ui"
+)
+
+// setupEnsureTest configures the test environment with a memory backend.
+func setupEnsureTest(t *testing.T) *memory.Backend {
+	t.Helper()
+	newRootTestEnv(t)
+
+	// Reset ensure command's local flags to prevent StringArray accumulation.
+	root := RootCmd()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "ensure" {
+			resetSliceFlag(cmd, "mount")
+			resetSliceFlag(cmd, "allow-egress")
+			resetSliceFlag(cmd, "modules")
+			_ = cmd.Flags().Set("backend", "")
+			cmd.Flags().Lookup("backend").Changed = false
+			_ = cmd.Flags().Set("cpus", "0")
+			cmd.Flags().Lookup("cpus").Changed = false
+			_ = cmd.Flags().Set("memory", "")
+			cmd.Flags().Lookup("memory").Changed = false
+			_ = cmd.Flags().Set("disk", "")
+			cmd.Flags().Lookup("disk").Changed = false
+			break
+		}
+	}
+
+	mb := memory.New()
+	origGetBackend := getBackendFunc
+	getBackendFunc = func(_ string) (backend.Backend, error) {
+		return mb, nil
+	}
+	origValidateBackend := validateBackendFunc
+	validateBackendFunc = func(_ string) error {
+		return nil
+	}
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		validateBackendFunc = origValidateBackend
+		mb.Reset()
+	})
+	return mb
+}
+
+// --- Registration tests ---
+
+func TestEnsureCommand_Registered(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+
+	found := false
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "ensure" {
+			found = true
+			assert.Equal(t, "vm", cmd.GroupID)
+			break
+		}
+	}
+	assert.True(t, found, "ensure command must be registered")
+}
+
+func TestEnsureCommand_AliasUp(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+
+	cmd, _, err := root.Find([]string{"ensure"})
+	require.NoError(t, err)
+	assert.Contains(t, cmd.Aliases, "up", "ensure must have alias 'up'")
+}
+
+func TestEnsureCommand_AliasUp_Functional(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	root := RootCmd()
+	root.SetArgs([]string{"up", "testvm"})
+	err := root.Execute()
+	require.NoError(t, err)
+
+	// VM should have been created and be running
+	status, sErr := mb.Status(ctx, "testvm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusRunning, status)
+}
+
+func TestEnsureCommand_ExactArgs(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+
+	cmd, _, err := root.Find([]string{"ensure"})
+	require.NoError(t, err)
+	assert.NotNil(t, cmd.Args, "ensure must have an Args validator")
+	err = cmd.Args(cmd, nil)
+	assert.Error(t, err, "ensure must reject zero args")
+}
+
+func TestEnsureCommand_Flags(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+
+	cmd, _, err := root.Find([]string{"ensure"})
+	require.NoError(t, err)
+
+	// REQ-002-025: Must accept all create flags
+	_, err = cmd.Flags().GetString("backend")
+	assert.NoError(t, err, "must have --backend flag")
+
+	_, err = cmd.Flags().GetInt("cpus")
+	assert.NoError(t, err, "must have --cpus flag")
+
+	_, err = cmd.Flags().GetString("memory")
+	assert.NoError(t, err, "must have --memory flag")
+
+	_, err = cmd.Flags().GetString("disk")
+	assert.NoError(t, err, "must have --disk flag")
+
+	_, err = cmd.Flags().GetStringSlice("modules")
+	assert.NoError(t, err, "must have --modules flag")
+
+	_, err = cmd.Flags().GetStringArray("mount")
+	assert.NoError(t, err, "must have --mount flag")
+
+	_, err = cmd.Flags().GetStringArray("allow-egress")
+	assert.NoError(t, err, "must have --allow-egress flag")
+}
+
+// --- Core logic tests ---
+
+func TestEnsureCommand_CreatesWhenNotFound(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure", "newvm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+	assert.Contains(t, buf.String(), "newvm")
+
+	// VM should exist and be running
+	status, sErr := mb.Status(ctx, "newvm")
+	require.NoError(t, sErr)
+	assert.Equal(t, backend.StatusRunning, status)
+}
+
+func TestEnsureCommand_StartsWhenStopped(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	// Pre-create a VM and stop it
+	require.NoError(t, mb.Create(ctx, "stoppedvm", backend.VMConfig{}))
+	require.NoError(t, mb.Stop(ctx, "stoppedvm"))
+
+	// Verify it's stopped
+	status, err := mb.Status(ctx, "stoppedvm")
+	require.NoError(t, err)
+	assert.Equal(t, backend.StatusStopped, status)
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure", "stoppedvm"})
+	execErr := root.Execute()
+	require.NoError(t, execErr)
+
+	// VM should now be running
+	status, err = mb.Status(ctx, "stoppedvm")
+	require.NoError(t, err)
+	assert.Equal(t, backend.StatusRunning, status)
+}
+
+func TestEnsureCommand_NoopWhenRunning(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	// Pre-create a VM (memory backend creates in Running state)
+	require.NoError(t, mb.Create(ctx, "runningvm", backend.VMConfig{}))
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure", "runningvm"})
+	execErr := root.Execute()
+	require.NoError(t, execErr)
+
+	// VM should still be running
+	status, err := mb.Status(ctx, "runningvm")
+	require.NoError(t, err)
+	assert.Equal(t, backend.StatusRunning, status)
+}
+
+func TestEnsureCommand_InvalidName(t *testing.T) {
+	setupEnsureTest(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure", "INVALID-VM-NAME"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok, "must be a CLIError")
+	assert.Equal(t, "invalid_argument", cliErr.Code)
+}
+
+// --- JSON output tests ---
+
+func TestEnsureCommand_JSON_Created(t *testing.T) {
+	setupEnsureTest(t)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "ensure", "newvm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "newvm", data["name"])
+	assert.Equal(t, "created", data["action"])
+	assert.Equal(t, "running", data["status"])
+	assert.NotEmpty(t, data["backend"])
+}
+
+func TestEnsureCommand_JSON_Started(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	// Pre-create and stop
+	require.NoError(t, mb.Create(ctx, "stoppedvm", backend.VMConfig{}))
+	require.NoError(t, mb.Stop(ctx, "stoppedvm"))
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "ensure", "stoppedvm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "stoppedvm", data["name"])
+	assert.Equal(t, "started", data["action"])
+	assert.Equal(t, "running", data["status"])
+}
+
+func TestEnsureCommand_JSON_AlreadyRunning(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "runningvm", backend.VMConfig{}))
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "ensure", "runningvm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "runningvm", data["name"])
+	assert.Equal(t, "already_running", data["action"])
+	assert.Equal(t, "running", data["status"])
+}
+
+// --- Idempotency test ---
+
+func TestEnsureCommand_Idempotent(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	// Call ensure N times -- VM should always end up running
+	for i := 0; i < 5; i++ {
+		root := RootCmd()
+		root.SetArgs([]string{"ensure", "idemvm"})
+		err := root.Execute()
+		require.NoError(t, err, "ensure call %d should succeed", i+1)
+	}
+
+	status, err := mb.Status(ctx, "idemvm")
+	require.NoError(t, err)
+	assert.Equal(t, backend.StatusRunning, status)
+
+	// Only one VM should exist (not duplicated)
+	vms, err := mb.List(ctx)
+	require.NoError(t, err)
+	count := 0
+	for _, vm := range vms {
+		if vm.Name == "idemvm" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "exactly one VM named 'idemvm' should exist")
+}
+
+// --- Error handling tests ---
+
+func TestEnsureCommand_BackendUnavailable(t *testing.T) {
+	mb := setupEnsureTest(t)
+	mb.SetMethodError("available", fmt.Errorf("backend not available"))
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure", "testvm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "backend_unavailable", cliErr.Code)
+}
+
+func TestEnsureCommand_StartFails(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	// Pre-create and stop, then inject start error
+	require.NoError(t, mb.Create(ctx, "failvm", backend.VMConfig{}))
+	require.NoError(t, mb.Stop(ctx, "failvm"))
+	mb.SetMethodError("start", fmt.Errorf("start engine broken"))
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure", "failvm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "vm_start_failed", cliErr.Code)
+}
+
+func TestEnsureCommand_StatusCheckFails(t *testing.T) {
+	mb := setupEnsureTest(t)
+	// Inject status error that is NOT ErrVMNotFound
+	mb.SetMethodError("status", fmt.Errorf("status check broken"))
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure", "testvm"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "vm_status_failed", cliErr.Code)
+}
+
+func TestEnsureCommand_MissingName(t *testing.T) {
+	newRootTestEnv(t)
+
+	root := RootCmd()
+	root.SetArgs([]string{"ensure"})
+	err := root.Execute()
+	assert.Error(t, err, "ensure without name must fail")
+}
