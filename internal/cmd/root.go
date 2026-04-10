@@ -65,6 +65,7 @@ credential injection, and session management.`,
 				"connect": true, "ssh-config": true, "sync": true,
 				"audit": true, "config": true, "provision": true, "security": true,
 				"logs": true, "token": true, "diff": true, "guide": true,
+				"quick-start": true,
 			}
 			for c := cmd; c != nil; c = c.Parent() {
 				if noConfigCmds[c.Name()] {
