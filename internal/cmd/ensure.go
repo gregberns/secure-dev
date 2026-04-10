@@ -193,7 +193,7 @@ func ensureCreate(cmd *cobra.Command, f *ui.Formatter, b backend.Backend, name, 
 	}
 
 	modulesFlag := resolveModules(cmd, ensureProjCfg)
-	if err := doCreateVM(cmd.Context(), f, b, name, backendName, vmCfg, modulesFlag); err != nil {
+	if err := doCreateVM(cmd.Context(), f, b, name, backendName, vmCfg, modulesFlag, ensureProjCfg); err != nil {
 		return err
 	}
 

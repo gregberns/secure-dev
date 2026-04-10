@@ -192,7 +192,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	modulesFlag := resolveModules(cmd, projCfg)
-	if err := doCreateVM(cmd.Context(), f, b, name, backendName, vmCfg, modulesFlag); err != nil {
+	if err := doCreateVM(cmd.Context(), f, b, name, backendName, vmCfg, modulesFlag, projCfg); err != nil {
 		return err
 	}
 
@@ -227,7 +227,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 // doCreateVM handles the start+provision+persist+audit flow after a VM has been
 // created by the backend. Used by both 'sd create' and 'sd ensure'.
 // REQ-002-024
-func doCreateVM(ctx context.Context, f *ui.Formatter, b backend.Backend, name, backendName string, vmCfg backend.VMConfig, modules []string) error {
+// REQ-009-004: After module provisioning, run declarative pipeline (packages, setup, repo).
+func doCreateVM(ctx context.Context, f *ui.Formatter, b backend.Backend, name, backendName string, vmCfg backend.VMConfig, modules []string, projCfg *config.ProjectConfig) error {
 	// REQ-001-006 step 4: Start the VM before provisioning.
 	// Lima's create only defines the VM config; start boots it.
 	f.Progress(fmt.Sprintf("Starting VM %q...", name))
@@ -262,6 +263,13 @@ func doCreateVM(ctx context.Context, f *ui.Formatter, b backend.Backend, name, b
 			Code:    "provision_script_failed",
 			Message: fmt.Sprintf("module %q failed: %s", provResult.Module, provResult.Error),
 		}
+	}
+
+	// REQ-009-004: Run declarative pipeline after module provisioning.
+	if err := runDeclarativePipeline(ctx, f, b, name, projCfg); err != nil {
+		f.Progress(fmt.Sprintf("Declarative provisioning failed, cleaning up VM %q...", name))
+		b.Destroy(ctx, name)
+		return err
 	}
 
 	// REQ-001-006 step 6: Persist VM configuration
@@ -592,6 +600,69 @@ func resolveModules(cmd *cobra.Command, projCfg *config.ProjectConfig) []string 
 	if projCfg != nil && len(projCfg.Modules) > 0 {
 		return projCfg.Modules
 	}
+	return nil
+}
+
+// runDeclarativePipeline runs the post-module declarative provisioning steps:
+// packages, setup commands, and repo clone.
+// REQ-009-004: Pipeline order: packages -> setup -> repo.
+// REQ-009-013: Fail-fast -- any step failure skips subsequent steps.
+func runDeclarativePipeline(ctx context.Context, f *ui.Formatter, b backend.Backend, name string, projCfg *config.ProjectConfig) error {
+	if projCfg == nil {
+		return nil
+	}
+
+	hasPackages := projCfg.Packages != nil && (len(projCfg.Packages.Apt) > 0 ||
+		len(projCfg.Packages.Pip) > 0 || len(projCfg.Packages.Npm) > 0 ||
+		len(projCfg.Packages.Go) > 0 || len(projCfg.Packages.Cargo) > 0)
+	hasSetup := len(projCfg.Setup) > 0
+	hasRepo := projCfg.Repo != ""
+
+	if !hasPackages && !hasSetup && !hasRepo {
+		return nil
+	}
+
+	execFn := func(execCtx context.Context, vmName string, command []string) (string, string, int, error) {
+		result, execErr := b.Exec(execCtx, vmName, command)
+		if execErr != nil {
+			return "", "", 0, execErr
+		}
+		return result.Stdout, result.Stderr, result.ExitCode, nil
+	}
+
+	// REQ-009-004 step 2-3: Prerequisite validation + Package installation.
+	if hasPackages {
+		f.Progress(fmt.Sprintf("Installing packages on VM %q...", name))
+		if err := provision.InstallPackages(ctx, execFn, name, projCfg.Packages); err != nil {
+			return ui.CLIError{
+				Code:    "package_install_failed",
+				Message: err.Error(),
+			}
+		}
+	}
+
+	// REQ-009-004 step 4: Setup commands.
+	if hasSetup {
+		f.Progress(fmt.Sprintf("Running setup commands on VM %q...", name))
+		if err := provision.RunSetupCommands(ctx, execFn, name, projCfg.Setup); err != nil {
+			return ui.CLIError{
+				Code:    "setup_command_failed",
+				Message: err.Error(),
+			}
+		}
+	}
+
+	// REQ-009-004 step 5: Repository clone.
+	if hasRepo {
+		f.Progress(fmt.Sprintf("Cloning repository into VM %q...", name))
+		if err := provision.CloneRepo(ctx, execFn, name, projCfg.Repo, projCfg.Branch); err != nil {
+			return ui.CLIError{
+				Code:    "repo_clone_failed",
+				Message: err.Error(),
+			}
+		}
+	}
+
 	return nil
 }
 

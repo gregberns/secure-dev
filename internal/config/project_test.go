@@ -291,6 +291,304 @@ func TestProjectConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, original, restored)
 }
 
+// --- Declarative environment field validation tests (REQ-009-011) ---
+
+func TestLoadProjectConfig_PackagesAllSubKeys(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+packages:
+  apt:
+    - jq
+  pip:
+    - black
+  npm:
+    - prettier
+  go:
+    - golang.org/x/tools/cmd/goimports@latest
+  cargo:
+    - ripgrep
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Packages)
+	assert.Equal(t, []string{"jq"}, cfg.Packages.Apt)
+	assert.Equal(t, []string{"black"}, cfg.Packages.Pip)
+	assert.Equal(t, []string{"prettier"}, cfg.Packages.Npm)
+	assert.Equal(t, []string{"golang.org/x/tools/cmd/goimports@latest"}, cfg.Packages.Go)
+	assert.Equal(t, []string{"ripgrep"}, cfg.Packages.Cargo)
+}
+
+func TestLoadProjectConfig_PackagesSubset(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+packages:
+  apt:
+    - jq
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Packages)
+	assert.Equal(t, []string{"jq"}, cfg.Packages.Apt)
+	assert.Nil(t, cfg.Packages.Pip)
+}
+
+func TestLoadProjectConfig_NoPackagesField(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Packages)
+}
+
+func TestLoadProjectConfig_EmptyPackageSubKey(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+packages:
+  apt: []
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	// Empty list treated same as absent
+	require.NotNil(t, cfg.Packages)
+	assert.Empty(t, cfg.Packages.Apt)
+}
+
+func TestLoadProjectConfig_EmptyStringInPackages(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+packages:
+  apt:
+    - ""
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	_, err := LoadProjectConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "packages.apt[0]: must be a non-empty string")
+}
+
+func TestLoadProjectConfig_EmptyStringInPip(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+packages:
+  pip:
+    - ""
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	_, err := LoadProjectConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "packages.pip[0]")
+}
+
+func TestLoadProjectConfig_SetupField(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+setup:
+  - mkdir -p ~/bin
+  - echo hello
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"mkdir -p ~/bin", "echo hello"}, cfg.Setup)
+}
+
+func TestLoadProjectConfig_EmptyStringInSetup(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+setup:
+  - ""
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	_, err := LoadProjectConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "setup[0]: must be a non-empty string")
+}
+
+func TestLoadProjectConfig_RepoHTTPS(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+repo: https://github.com/user/repo.git
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/user/repo.git", cfg.Repo)
+}
+
+func TestLoadProjectConfig_RepoSSH(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+repo: git@github.com:user/repo.git
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "git@github.com:user/repo.git", cfg.Repo)
+}
+
+func TestLoadProjectConfig_RepoInvalidURL(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+repo: not-a-url
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	_, err := LoadProjectConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid repo")
+	assert.Contains(t, err.Error(), "HTTPS URL")
+}
+
+func TestLoadProjectConfig_BranchWithoutRepo(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+branch: main
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	_, err := LoadProjectConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "branch is set but repo is not")
+}
+
+func TestLoadProjectConfig_BranchWithSpaces(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+repo: https://github.com/user/repo.git
+branch: "has space"
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	_, err := LoadProjectConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid branch")
+}
+
+func TestLoadProjectConfig_BranchWithDoubleDot(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+repo: https://github.com/user/repo.git
+branch: "main..develop"
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	_, err := LoadProjectConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid branch")
+}
+
+func TestLoadProjectConfig_ValidRepoBranch(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+repo: https://github.com/user/repo.git
+branch: main
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/user/repo.git", cfg.Repo)
+	assert.Equal(t, "main", cfg.Branch)
+}
+
+func TestLoadProjectConfig_RepoWithoutBranch(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: test-vm
+repo: https://github.com/user/repo.git
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/user/repo.git", cfg.Repo)
+	assert.Empty(t, cfg.Branch)
+}
+
+func TestLoadProjectConfig_FullDeclarative(t *testing.T) {
+	dir := t.TempDir()
+	content := `name: my-app
+modules:
+  - base
+  - golang
+repo: https://github.com/user/my-app.git
+branch: main
+packages:
+  apt:
+    - jq
+    - protobuf-compiler
+  go:
+    - google.golang.org/protobuf/cmd/protoc-gen-go@latest
+setup:
+  - mkdir -p ~/bin
+`
+	path := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg, err := LoadProjectConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "my-app", cfg.Name)
+	assert.Equal(t, "https://github.com/user/my-app.git", cfg.Repo)
+	assert.Equal(t, "main", cfg.Branch)
+	require.NotNil(t, cfg.Packages)
+	assert.Equal(t, []string{"jq", "protobuf-compiler"}, cfg.Packages.Apt)
+	assert.Equal(t, []string{"google.golang.org/protobuf/cmd/protoc-gen-go@latest"}, cfg.Packages.Go)
+	assert.Equal(t, []string{"mkdir -p ~/bin"}, cfg.Setup)
+}
+
+func TestProjectConfig_DeclarativeRoundTrip(t *testing.T) {
+	original := ProjectConfig{
+		Name:    "round-trip",
+		Backend: "lima",
+		Repo:    "https://github.com/user/repo.git",
+		Branch:  "main",
+		Packages: &PackageConfig{
+			Apt: []string{"jq", "curl"},
+			Pip: []string{"black"},
+		},
+		Setup: []string{"mkdir -p ~/bin"},
+	}
+
+	data, err := yaml.Marshal(&original)
+	require.NoError(t, err)
+
+	var restored ProjectConfig
+	err = yaml.Unmarshal(data, &restored)
+	require.NoError(t, err)
+
+	assert.Equal(t, original, restored)
+}
+
 // --- ResolveMountPaths tests ---
 
 func TestResolveMountPaths(t *testing.T) {

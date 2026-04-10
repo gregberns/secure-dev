@@ -16,15 +16,32 @@ import (
 
 // ProjectConfig represents the .sd.yaml project configuration file.
 // REQ-005-020: Defines VM name, backend, resources, modules, mounts, egress.
+// REQ-009-001, REQ-009-002, REQ-009-003: Declarative packages, setup, repo.
 type ProjectConfig struct {
-	Name        string   `yaml:"name,omitempty"`
-	Backend     string   `yaml:"backend,omitempty"`
-	CPUs        int      `yaml:"cpus,omitempty"`
-	Memory      string   `yaml:"memory,omitempty"`
-	Disk        string   `yaml:"disk,omitempty"`
-	Modules     []string `yaml:"modules,omitempty"`
-	Mounts      []string `yaml:"mounts,omitempty"`       // "host:guest:mode"
-	AllowEgress []string `yaml:"allow_egress,omitempty"`
+	Name        string         `yaml:"name,omitempty"`
+	Backend     string         `yaml:"backend,omitempty"`
+	CPUs        int            `yaml:"cpus,omitempty"`
+	Memory      string         `yaml:"memory,omitempty"`
+	Disk        string         `yaml:"disk,omitempty"`
+	Modules     []string       `yaml:"modules,omitempty"`
+	Mounts      []string       `yaml:"mounts,omitempty"`       // "host:guest:mode"
+	AllowEgress []string       `yaml:"allow_egress,omitempty"`
+	Repo        string         `yaml:"repo,omitempty"`
+	Branch      string         `yaml:"branch,omitempty"`
+	Packages    *PackageConfig `yaml:"packages,omitempty"`
+	Setup       []string       `yaml:"setup,omitempty"`
+}
+
+// PackageConfig declares packages to install via system and language
+// package managers. Each field is optional; absent or empty lists
+// result in no installation for that manager.
+// REQ-009-001
+type PackageConfig struct {
+	Apt   []string `yaml:"apt,omitempty"`
+	Pip   []string `yaml:"pip,omitempty"`
+	Npm   []string `yaml:"npm,omitempty"`
+	Go    []string `yaml:"go,omitempty"`
+	Cargo []string `yaml:"cargo,omitempty"`
 }
 
 // ProjectConfigFile is the filename for project configuration.
@@ -131,6 +148,70 @@ func validateProjectConfig(cfg *ProjectConfig, path string) error {
 		}
 	}
 
+	// REQ-009-011: Validate declarative environment fields
+	if err := validateDeclarativeFields(cfg, path); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateDeclarativeFields validates repo, branch, packages, and setup fields.
+// REQ-009-011
+func validateDeclarativeFields(cfg *ProjectConfig, path string) error {
+	// repo must be HTTPS or SSH URL
+	if cfg.Repo != "" {
+		if !strings.HasPrefix(cfg.Repo, "https://") &&
+			!strings.HasPrefix(cfg.Repo, "git@") {
+			return fmt.Errorf("%s: invalid repo %q: must be an HTTPS URL (https://...) or SSH URL (git@...)", path, cfg.Repo)
+		}
+	}
+
+	// branch requires repo
+	if cfg.Branch != "" && cfg.Repo == "" {
+		return fmt.Errorf("%s: branch is set but repo is not; branch requires a repo URL", path)
+	}
+
+	// branch must be a valid git branch name and contain no shell metacharacters
+	if cfg.Branch != "" {
+		if strings.ContainsAny(cfg.Branch, " \t\n\r") ||
+			strings.Contains(cfg.Branch, "..") ||
+			containsShellMeta(cfg.Branch) {
+			return fmt.Errorf("%s: invalid branch %q: must be a valid git branch name", path, cfg.Branch)
+		}
+	}
+
+	// repo must not contain shell metacharacters (beyond what HTTPS/SSH URLs need)
+	if cfg.Repo != "" && containsShellMeta(cfg.Repo) {
+		return fmt.Errorf("%s: repo %q: contains unsafe characters", path, cfg.Repo)
+	}
+
+	// Validate package entries
+	if cfg.Packages != nil {
+		if err := validatePackageList(cfg.Packages.Apt, "apt", path); err != nil {
+			return err
+		}
+		if err := validatePackageList(cfg.Packages.Pip, "pip", path); err != nil {
+			return err
+		}
+		if err := validatePackageList(cfg.Packages.Npm, "npm", path); err != nil {
+			return err
+		}
+		if err := validatePackageList(cfg.Packages.Go, "go", path); err != nil {
+			return err
+		}
+		if err := validatePackageList(cfg.Packages.Cargo, "cargo", path); err != nil {
+			return err
+		}
+	}
+
+	// Validate setup entries
+	for i, s := range cfg.Setup {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Errorf("%s: setup[%d]: must be a non-empty string", path, i)
+		}
+	}
+
 	return nil
 }
 
@@ -196,4 +277,33 @@ func ResolveMountPaths(mounts []string, projectDir string) []string {
 		resolved[i] = strings.Join(parts, ":")
 	}
 	return resolved
+}
+
+// shellMetaChars contains characters that have special meaning in shell contexts.
+// These must be rejected in user-supplied values that are interpolated into scripts.
+const shellMetaChars = ";|&$`(){}><\n\r\"'\\!"
+
+// containsShellMeta returns true if s contains any shell metacharacter.
+func containsShellMeta(s string) bool {
+	return strings.ContainsAny(s, shellMetaChars)
+}
+
+// safePackageNamePattern matches package names that are safe to interpolate.
+// Allows alphanumeric, hyphens, dots, slashes, @, +, _, =, :, ~, []
+// (for version specifiers like package@v1.2.3, golang.org/x/tools/...@latest,
+// pip extras like package[extra], version constraints like >=1.0).
+var safePackageNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._/@+=:~\[\],-][a-zA-Z0-9._/@+=:~\[\],-]*$`)
+
+// validatePackageList checks that every entry in pkgs is non-empty and
+// contains no shell metacharacters.
+func validatePackageList(pkgs []string, managerName, path string) error {
+	for i, p := range pkgs {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("%s: packages.%s[%d]: must be a non-empty string", path, managerName, i)
+		}
+		if !safePackageNamePattern.MatchString(p) || containsShellMeta(p) {
+			return fmt.Errorf("%s: packages.%s[%d]: contains unsafe characters", path, managerName, i)
+		}
+	}
+	return nil
 }
