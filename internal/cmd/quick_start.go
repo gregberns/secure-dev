@@ -7,6 +7,7 @@
 package cmd
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 
@@ -15,6 +16,12 @@ import (
 	"sd/internal/config"
 	"sd/internal/ui"
 )
+
+// quickStartRunbook is the agent-executable runbook embedded from templates.
+// REQ-010-003, REQ-010-004 through REQ-010-013
+//
+//go:embed templates/quick_start_runbook.md
+var quickStartRunbook string
 
 // quickStartCheckResult is the JSON structure for --check output.
 // REQ-010-015
@@ -84,18 +91,18 @@ func runQuickStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// REQ-010-002: --json wraps runbook in JSON envelope
-	placeholder := "Quick-start runbook will be here. Use sd guide --agent for command reference."
+	// REQ-010-003: Runbook output as Markdown
 	if f.JSONMode() {
 		type runbookData struct {
 			Runbook string `json:"runbook"`
 		}
-		f.SuccessData(runbookData{Runbook: placeholder}, nil)
+		f.SuccessData(runbookData{Runbook: quickStartRunbook}, nil)
 		return nil
 	}
 
-	// Default: output placeholder message
+	// Default: output runbook as Markdown to stdout
 	f.SuccessData(nil, func() string {
-		return placeholder + "\n"
+		return quickStartRunbook
 	})
 	return nil
 }
@@ -122,9 +129,7 @@ func runQuickStartCheck(cmd *cobra.Command, f *ui.Formatter) error {
 	_, projCfg, findErr := findProjectConfigFunc(cwd)
 	if findErr != nil {
 		result.Issues = append(result.Issues, fmt.Sprintf("Error reading .sd.yaml: %v", findErr))
-	}
-
-	if projCfg != nil {
+	} else if projCfg != nil {
 		result.SDYamlExists = true
 		result.VMName = projCfg.Name
 		result.Backend = projCfg.Backend
@@ -133,6 +138,24 @@ func runQuickStartCheck(cmd *cobra.Command, f *ui.Formatter) error {
 		}
 		if len(projCfg.Modules) > 0 {
 			result.Modules = projCfg.Modules
+		}
+		// REQ-010-015: Populate packages_declared from PackageConfig
+		if projCfg.Packages != nil {
+			if len(projCfg.Packages.Apt) > 0 {
+				result.PackagesDeclared["apt"] = len(projCfg.Packages.Apt)
+			}
+			if len(projCfg.Packages.Pip) > 0 {
+				result.PackagesDeclared["pip"] = len(projCfg.Packages.Pip)
+			}
+			if len(projCfg.Packages.Npm) > 0 {
+				result.PackagesDeclared["npm"] = len(projCfg.Packages.Npm)
+			}
+			if len(projCfg.Packages.Go) > 0 {
+				result.PackagesDeclared["go"] = len(projCfg.Packages.Go)
+			}
+			if len(projCfg.Packages.Cargo) > 0 {
+				result.PackagesDeclared["cargo"] = len(projCfg.Packages.Cargo)
+			}
 		}
 	}
 
@@ -166,8 +189,8 @@ func runQuickStartCheck(cmd *cobra.Command, f *ui.Formatter) error {
 	}
 
 	// Build issues list
-	if !result.SDYamlExists {
-		result.Issues = append(result.Issues, "No .sd.yaml found -- run sd quick-start to set up")
+	if findErr == nil && !result.SDYamlExists {
+		result.Issues = append(result.Issues, "No .sd.yaml found in this directory -- run sd init to create one")
 	}
 	if result.SDYamlExists && !result.VMExists {
 		result.Issues = append(result.Issues,
