@@ -204,7 +204,13 @@ func ensureCreate(cmd *cobra.Command, f *ui.Formatter, b backend.Backend, name, 
 		Status:  string(backend.StatusRunning),
 	}
 
-	f.SuccessData(result, func() string {
+	// REQ-010-016: Contextual hints after VM creation via ensure
+	hints := []string{
+		"Export GITHUB_TOKEN on the host before running sd connect to inject credentials into the VM.",
+		"Run sd config egress list to review which domains the VM can reach.",
+	}
+
+	f.SuccessDataWithHints(result, hints, func() string {
 		return fmt.Sprintf("VM %q created and started.\n", name)
 	})
 	return nil
@@ -245,7 +251,12 @@ func ensureStart(cmd *cobra.Command, f *ui.Formatter, b backend.Backend, name, b
 		Status:  string(backend.StatusRunning),
 	}
 
-	f.SuccessData(result, func() string {
+	// REQ-010-016: Contextual hints after starting a stopped VM
+	hints := []string{
+		"Export GITHUB_TOKEN on the host before running sd connect to inject credentials into the VM.",
+	}
+
+	f.SuccessDataWithHints(result, hints, func() string {
 		return fmt.Sprintf("VM %q started.\n", name)
 	})
 	return nil

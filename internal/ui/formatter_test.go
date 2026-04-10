@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"pgregory.net/rapid"
 )
 
 func TestCLIError_Error(t *testing.T) {
@@ -308,6 +309,181 @@ func TestProperty_HumanErrorAlwaysStartsWithError(t *testing.T) {
 				"Human error output must start with 'Error: ': got %q", stderr.String())
 		}
 	}
+}
+
+// --- SuccessDataWithHints tests (REQ-010-016) ---
+
+func TestFormatter_JSONMode_SuccessDataWithHints_Present(t *testing.T) {
+	var stdout bytes.Buffer
+	f := NewFormatterWithWriters(true, &stdout, ioDiscard{})
+
+	hints := []string{
+		"Export GITHUB_TOKEN on the host before running sd connect.",
+		"Run sd config egress list to review allowed domains.",
+	}
+	f.SuccessDataWithHints(map[string]string{"name": "myvm"}, hints, func() string {
+		return "VM created.\n"
+	})
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	assert.True(t, result["ok"].(bool))
+
+	// hints field must be present with correct values
+	hintsRaw, ok := result["hints"]
+	require.True(t, ok, "hints field must be present in JSON output")
+	hintsArr := hintsRaw.([]any)
+	assert.Len(t, hintsArr, 2)
+	assert.Equal(t, "Export GITHUB_TOKEN on the host before running sd connect.", hintsArr[0])
+	assert.Equal(t, "Run sd config egress list to review allowed domains.", hintsArr[1])
+
+	// data must still be present
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "myvm", data["name"])
+}
+
+func TestFormatter_JSONMode_SuccessDataWithHints_NilHints(t *testing.T) {
+	var stdout bytes.Buffer
+	f := NewFormatterWithWriters(true, &stdout, ioDiscard{})
+
+	f.SuccessDataWithHints(map[string]string{"name": "myvm"}, nil, func() string {
+		return "VM created.\n"
+	})
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	assert.True(t, result["ok"].(bool))
+
+	// hints field must be absent when nil
+	_, hasHints := result["hints"]
+	assert.False(t, hasHints, "hints field must be absent when hints is nil")
+}
+
+func TestFormatter_JSONMode_SuccessDataWithHints_EmptyHints(t *testing.T) {
+	var stdout bytes.Buffer
+	f := NewFormatterWithWriters(true, &stdout, ioDiscard{})
+
+	f.SuccessDataWithHints(map[string]string{"name": "myvm"}, []string{}, func() string {
+		return "VM created.\n"
+	})
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	assert.True(t, result["ok"].(bool))
+
+	// hints field must be absent when empty slice
+	_, hasHints := result["hints"]
+	assert.False(t, hasHints, "hints field must be absent when hints is empty")
+}
+
+func TestFormatter_HumanMode_SuccessDataWithHints_NoHintsInOutput(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	f := NewFormatterWithWriters(false, &stdout, &stderr)
+
+	hints := []string{"This hint should not appear in human output."}
+	f.SuccessDataWithHints("data", hints, func() string {
+		return "VM created.\n"
+	})
+
+	// Human output should show the formatted text, not hints
+	assert.Equal(t, "VM created.\n", stdout.String())
+	assert.Empty(t, stderr.String())
+	assert.NotContains(t, stdout.String(), "hint")
+}
+
+func TestProperty_SuccessDataWithHints_AlwaysValidJSON(t *testing.T) {
+	testCases := []struct {
+		name  string
+		hints []string
+	}{
+		{"nil_hints", nil},
+		{"empty_hints", []string{}},
+		{"single_hint", []string{"hint one"}},
+		{"multiple_hints", []string{"hint one", "hint two", "hint three"}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			f := NewFormatterWithWriters(true, &buf, ioDiscard{})
+			f.SuccessDataWithHints(map[string]string{"k": "v"}, tc.hints, nil)
+
+			var result map[string]any
+			require.NoError(t, json.Unmarshal(buf.Bytes(), &result),
+				"output must be valid JSON: %s", buf.String())
+			assert.True(t, result["ok"].(bool))
+
+			if len(tc.hints) > 0 {
+				hintsArr := result["hints"].([]any)
+				assert.Len(t, hintsArr, len(tc.hints))
+				for i, h := range tc.hints {
+					assert.Equal(t, h, hintsArr[i])
+				}
+			} else {
+				_, hasHints := result["hints"]
+				assert.False(t, hasHints, "hints must be absent when nil or empty")
+			}
+		})
+	}
+}
+
+// --- Property-based tests using rapid (REQ-010-016) ---
+
+// Property: for any non-empty hint string, SuccessDataWithHints always includes
+// it in JSON output. This is the core invariant of the hints system.
+func TestRapid_SuccessDataWithHints_NonEmptyHintAlwaysPresent(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Generate 1-5 non-empty hint strings
+		n := rapid.IntRange(1, 5).Draw(t, "numHints")
+		hints := make([]string, n)
+		for i := range hints {
+			hints[i] = rapid.StringMatching(`.{1,100}`).Draw(t, "hint")
+		}
+
+		var buf bytes.Buffer
+		f := NewFormatterWithWriters(true, &buf, ioDiscard{})
+		f.SuccessDataWithHints(map[string]string{"key": "value"}, hints, nil)
+
+		var result map[string]any
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &result),
+			"output must be valid JSON: %s", buf.String())
+		assert.True(t, result["ok"].(bool))
+
+		// hints field must be present
+		hintsRaw, hasHints := result["hints"]
+		require.True(t, hasHints, "hints field must be present for non-empty hints slice")
+		hintsArr := hintsRaw.([]any)
+		assert.Len(t, hintsArr, n, "hints array length must match input")
+
+		// Every input hint must appear in the output
+		for i, h := range hints {
+			assert.Equal(t, h, hintsArr[i], "hint at index %d must match input", i)
+		}
+	})
+}
+
+// Property: for nil or empty hints, the hints field is always omitted from JSON output.
+func TestRapid_SuccessDataWithHints_EmptyHintsAlwaysOmitted(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Randomly choose nil or empty slice
+		useNil := rapid.Bool().Draw(t, "useNil")
+		var hints []string
+		if !useNil {
+			hints = []string{}
+		}
+
+		var buf bytes.Buffer
+		f := NewFormatterWithWriters(true, &buf, ioDiscard{})
+		f.SuccessDataWithHints(map[string]string{"key": "value"}, hints, nil)
+
+		var result map[string]any
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &result),
+			"output must be valid JSON: %s", buf.String())
+		assert.True(t, result["ok"].(bool))
+
+		_, hasHints := result["hints"]
+		assert.False(t, hasHints, "hints field must be absent when hints is nil or empty")
+	})
 }
 
 // ioDiscard is a io.Writer that discards all output.

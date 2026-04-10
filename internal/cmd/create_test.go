@@ -224,6 +224,49 @@ func TestCreateCommand_BasicCreate_JSONOutput(t *testing.T) {
 	assert.Equal(t, "lima", data["backend"])
 }
 
+// REQ-010-016: Verify create JSON output includes hints
+func TestCreateCommand_JSON_ContainsHints(t *testing.T) {
+	setupCreateTest(t)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "create", "testvm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+
+	// REQ-010-016: hints field must be present and non-empty
+	hintsRaw, hasHints := result["hints"]
+	require.True(t, hasHints, "JSON output must contain 'hints' field after create")
+	hintsArr, ok := hintsRaw.([]any)
+	require.True(t, ok, "hints must be a JSON array")
+	assert.NotEmpty(t, hintsArr, "hints array must not be empty after create")
+
+	// Verify expected hint content
+	hintsStrs := make([]string, len(hintsArr))
+	for i, h := range hintsArr {
+		hintsStrs[i] = h.(string)
+	}
+	assert.Contains(t, hintsStrs, "Export GITHUB_TOKEN on the host before running sd connect to inject credentials into the VM.")
+	assert.Contains(t, hintsStrs, "Run sd config egress list to review which domains the VM can reach.")
+}
+
 func TestCreateCommand_VMAlreadyExists(t *testing.T) {
 	mb := setupCreateTest(t)
 	ctx := context.Background()

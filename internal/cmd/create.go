@@ -212,7 +212,13 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		Disk:    vmCfg.Disk,
 	}
 
-	f.SuccessData(result, func() string {
+	// REQ-010-016: Contextual hints after VM creation
+	hints := []string{
+		"Export GITHUB_TOKEN on the host before running sd connect to inject credentials into the VM.",
+		"Run sd config egress list to review which domains the VM can reach.",
+	}
+
+	f.SuccessDataWithHints(result, hints, func() string {
 		return fmt.Sprintf("VM %q created successfully.\n", name)
 	})
 	return nil

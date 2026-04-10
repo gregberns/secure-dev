@@ -30,6 +30,14 @@ type jsonSuccess struct {
 	Data any  `json:"data"`
 }
 
+// jsonSuccessWithHints is the JSON envelope for successful responses with hints.
+// REQ-010-016: Hints are contextual best practices for agent consumption.
+type jsonSuccessWithHints struct {
+	OK    bool     `json:"ok"`
+	Data  any      `json:"data"`
+	Hints []string `json:"hints,omitempty"`
+}
+
 // jsonError is the JSON envelope for error responses.
 // REQ-002-012
 type jsonError struct {
@@ -91,6 +99,20 @@ func (f *Formatter) SuccessData(data any, formatFunc func() string) {
 		enc := json.NewEncoder(f.stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(jsonSuccess{OK: true, Data: data})
+	} else if formatFunc != nil {
+		fmt.Fprint(f.stdout, formatFunc())
+	}
+}
+
+// SuccessDataWithHints outputs structured data with optional hints.
+// REQ-010-016: In JSON mode, includes a "hints" array at the top level when
+// hints is non-nil and non-empty. When hints is nil or empty, the field is
+// omitted entirely. Human output is unaffected by hints.
+func (f *Formatter) SuccessDataWithHints(data any, hints []string, formatFunc func() string) {
+	if f.jsonMode {
+		enc := json.NewEncoder(f.stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(jsonSuccessWithHints{OK: true, Data: data, Hints: hints})
 	} else if formatFunc != nil {
 		fmt.Fprint(f.stdout, formatFunc())
 	}

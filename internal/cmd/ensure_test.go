@@ -267,6 +267,136 @@ func TestEnsureCommand_JSON_Created(t *testing.T) {
 	assert.NotEmpty(t, data["backend"])
 }
 
+// REQ-010-016: Verify ensure JSON output includes hints when VM is created
+func TestEnsureCommand_JSON_Created_ContainsHints(t *testing.T) {
+	setupEnsureTest(t)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "ensure", "newvm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+
+	// REQ-010-016: hints field must be present when VM is created via ensure
+	hintsRaw, hasHints := result["hints"]
+	require.True(t, hasHints, "JSON output must contain 'hints' field when ensure creates a VM")
+	hintsArr, ok := hintsRaw.([]any)
+	require.True(t, ok, "hints must be a JSON array")
+	assert.NotEmpty(t, hintsArr, "hints array must not be empty when ensure creates a VM")
+
+	// Verify expected hint content
+	hintsStrs := make([]string, len(hintsArr))
+	for i, h := range hintsArr {
+		hintsStrs[i] = h.(string)
+	}
+	assert.Contains(t, hintsStrs, "Export GITHUB_TOKEN on the host before running sd connect to inject credentials into the VM.")
+	assert.Contains(t, hintsStrs, "Run sd config egress list to review which domains the VM can reach.")
+}
+
+// REQ-010-016: Verify ensure JSON output includes hints when VM is started
+func TestEnsureCommand_JSON_Started_ContainsHints(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	// Pre-create and stop
+	require.NoError(t, mb.Create(ctx, "stoppedvm", backend.VMConfig{}))
+	require.NoError(t, mb.Stop(ctx, "stoppedvm"))
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "ensure", "stoppedvm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "started", data["action"])
+
+	// REQ-010-016: hints field must be present when VM is started
+	hintsRaw, hasHints := result["hints"]
+	require.True(t, hasHints, "JSON output must contain 'hints' field when ensure starts a VM")
+	hintsArr, ok := hintsRaw.([]any)
+	require.True(t, ok, "hints must be a JSON array")
+	assert.NotEmpty(t, hintsArr, "hints array must not be empty when ensure starts a VM")
+
+	// Started branch has a single hint about GITHUB_TOKEN
+	hintsStrs := make([]string, len(hintsArr))
+	for i, h := range hintsArr {
+		hintsStrs[i] = h.(string)
+	}
+	assert.Contains(t, hintsStrs, "Export GITHUB_TOKEN on the host before running sd connect to inject credentials into the VM.")
+}
+
+// REQ-010-016: Verify ensure JSON output has no hints when VM is already running
+// (already_running branch uses SuccessData, not SuccessDataWithHints)
+func TestEnsureCommand_JSON_AlreadyRunning_NoHints(t *testing.T) {
+	mb := setupEnsureTest(t)
+	ctx := context.Background()
+
+	require.NoError(t, mb.Create(ctx, "runningvm", backend.VMConfig{}))
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "ensure", "runningvm"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var result map[string]any
+	err = json.Unmarshal(buf.Bytes(), &result)
+	require.NoError(t, err, "output must be valid JSON: %s", buf.String())
+
+	assert.True(t, result["ok"].(bool))
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "already_running", data["action"])
+
+	// already_running uses SuccessData (no hints), so hints field must be absent
+	_, hasHints := result["hints"]
+	assert.False(t, hasHints, "JSON output must NOT contain 'hints' field when VM is already running")
+}
+
 func TestEnsureCommand_JSON_Started(t *testing.T) {
 	mb := setupEnsureTest(t)
 	ctx := context.Background()
