@@ -43,3 +43,7 @@ build/
 .dolt/
 *.db
 .beads-credential-key
+
+# kerf (except project-identifier)
+.kerf/
+!.kerf/project-identifier

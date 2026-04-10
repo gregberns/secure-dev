@@ -96,6 +96,8 @@ func TestRootCommand_CommandGroups(t *testing.T) {
 	}
 
 	// REQ-002-002: Required command groups
+	// REQ-002-023: "Getting Started" group for sd guide discovery
+	assert.Contains(t, groupIDs, "start")
 	assert.Contains(t, groupIDs, "vm")
 	assert.Contains(t, groupIDs, "connection")
 	assert.Contains(t, groupIDs, "config")
@@ -104,6 +106,7 @@ func TestRootCommand_CommandGroups(t *testing.T) {
 	assert.Contains(t, groupIDs, "diagnostics")
 	assert.Contains(t, groupIDs, "utility")
 
+	assert.Equal(t, "Getting Started", groupIDs["start"])
 	assert.Equal(t, "VM Management", groupIDs["vm"])
 	assert.Equal(t, "Connection", groupIDs["connection"])
 	assert.Equal(t, "Configuration", groupIDs["config"])
