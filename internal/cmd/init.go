@@ -5,7 +5,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -13,6 +15,19 @@ import (
 	"sd/internal/config"
 	"sd/internal/ui"
 )
+
+// detectGitRemote returns the URL of the 'origin' remote for the git repo at dir,
+// or empty string if not a git repo or no origin remote.
+// Overridable for testing.
+// REQ-009-012
+var detectGitRemote = func(dir string) string {
+	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
 
 func init() {
 	initCmd := &cobra.Command{
@@ -37,12 +52,38 @@ developer and agent gets the same VM environment via 'sd ensure'.`,
 	rootCmd.AddCommand(initCmd)
 }
 
+// packagesComment is the commented-out packages section for the init template.
+// REQ-009-012
+const packagesComment = `# Packages to install inside the VM (in addition to modules).
+# Uncomment and add packages as needed.
+# packages:
+#   apt:
+#     - jq
+#   pip:
+#     - black
+#   npm:
+#     - prettier
+#   go:
+#     - golang.org/x/tools/cmd/goimports@latest
+#   cargo:
+#     - ripgrep
+`
+
+// setupComment is the commented-out setup section for the init template.
+// REQ-009-012
+const setupComment = `# Setup commands run after packages are installed (as non-root user).
+# Each command should be idempotent (safe to run multiple times).
+# setup:
+#   - mkdir -p ~/bin
+`
+
 // initResult is the structured output for the init command.
 type initResult struct {
 	Path     string   `json:"path"`
 	Name     string   `json:"name"`
 	Modules  []string `json:"modules"`
 	Detected string   `json:"detected,omitempty"` // detected project type
+	Repo     string   `json:"repo,omitempty"`
 }
 
 // runInit executes the init command.
@@ -93,6 +134,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 		Mounts:  []string{fmt.Sprintf(".:/home/ubuntu/projects/%s:rw", vmName)},
 	}
 
+	// Auto-detect git remote URL for the repo field
+	// REQ-009-012
+	repoURL := detectGitRemote(cwd)
+
 	// Marshal to YAML
 	data, err := yaml.Marshal(&projCfg)
 	if err != nil {
@@ -108,7 +153,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 		"#\n" +
 		"# See: https://github.com/secure-dev/sd for documentation\n\n"
 
-	if err := os.WriteFile(sdYamlPath, []byte(header+string(data)), 0644); err != nil {
+	// Build the repo line (if detected) and commented-out sections
+	// REQ-009-012
+	var extra string
+	if repoURL != "" {
+		extra += fmt.Sprintf("repo: %s\n", repoURL)
+	}
+	extra += "\n" + packagesComment + "\n" + setupComment
+
+	if err := os.WriteFile(sdYamlPath, []byte(header+string(data)+extra), 0644); err != nil {
 		return ui.CLIError{
 			Code:    "write_failed",
 			Message: fmt.Sprintf("failed to write %s: %v", sdYamlPath, err),
@@ -120,6 +173,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		Name:     vmName,
 		Modules:  modules,
 		Detected: detected,
+		Repo:     repoURL,
 	}
 
 	f.SuccessData(result, func() string {
@@ -130,6 +184,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 		msg += fmt.Sprintf("  VM name: %s\n", vmName)
 		if len(modules) > 0 {
 			msg += fmt.Sprintf("  Modules: %v\n", modules)
+		}
+		if repoURL != "" {
+			msg += fmt.Sprintf("  Repo: %s\n", repoURL)
 		}
 		msg += "\nEdit the file to customize, then run 'sd ensure' to create the VM.\n"
 		return msg
