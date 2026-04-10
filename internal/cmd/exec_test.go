@@ -1,6 +1,7 @@
 // Package cmd provides tests for the exec command.
 // REQ-007-013: Exec Command
 // REQ-007-014: Exec JSON Output
+// REQ-007-019: Environment Injection on Exec
 // NOTE: Tests use global getBackendFunc — do not use t.Parallel().
 package cmd
 
@@ -54,7 +55,18 @@ func setupExecMemoryTest(t *testing.T, statusMap map[string]backend.VMStatus, re
 	getBackendFunc = func(_ string) (backend.Backend, error) {
 		return mb, nil
 	}
-	t.Cleanup(func() { getBackendFunc = origGetBackend; mb.Reset() })
+
+	// Default: no credentials
+	origReadCredFunc := readCredFunc
+	readCredFunc = func(_, _ string) (map[string]string, error) {
+		return nil, nil
+	}
+
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		readCredFunc = origReadCredFunc
+		mb.Reset()
+	})
 
 	return mb, calls
 }
@@ -682,4 +694,177 @@ func TestProperty_ExecErrorJSONFormat(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "vm_not_found", cliErr.Code)
 	assert.Contains(t, cliErr.Message, "nonexistent")
+}
+
+// --- REQ-007-019: Credential injection tests ---
+
+// Test that credentials are injected via env(1) prefix in the command passed to b.Exec().
+func TestExecCommand_CredentialInjection(t *testing.T) {
+	_, calls := setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0, Stdout: "ok\n"},
+		nil,
+	)
+
+	// Override readCredFunc to return test credentials
+	readCredFunc = func(_, _ string) (map[string]string, error) {
+		return map[string]string{
+			"GITHUB_TOKEN":      "ghp_test123",
+			"ANTHROPIC_API_KEY": "sk-ant-test456",
+		}, nil
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"exec", "myvm", "--", "echo", "hello"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+	require.Len(t, *calls, 1)
+	// Keys are sorted, so ANTHROPIC_API_KEY comes before GITHUB_TOKEN
+	assert.Equal(t, []string{
+		"env",
+		"ANTHROPIC_API_KEY=sk-ant-test456",
+		"GITHUB_TOKEN=ghp_test123",
+		"echo", "hello",
+	}, (*calls)[0].Command)
+}
+
+// Test that only credential keys (SD_*, ANTHROPIC_*, GITHUB_*, GH_*) are passed.
+func TestExecCommand_CredentialFiltering(t *testing.T) {
+	_, calls := setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0},
+		nil,
+	)
+
+	readCredFunc = func(_, _ string) (map[string]string, error) {
+		return map[string]string{
+			"GITHUB_TOKEN":      "ghp_test",
+			"ANTHROPIC_API_KEY": "sk-ant-test",
+			"SD_SESSION_ID":     "sess-123",
+			"GH_ENTERPRISE_URL": "https://gh.example.com",
+			"HOME":              "/home/user",     // should be filtered out
+			"PATH":              "/usr/bin",        // should be filtered out
+			"RANDOM_VAR":        "should-not-pass", // should be filtered out
+		}, nil
+	}
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "exec", "myvm", "--", "env"})
+	err := root.Execute()
+	require.NoError(t, err)
+
+	require.Len(t, *calls, 1)
+	cmd := (*calls)[0].Command
+	// Command should be: env ANTHROPIC_API_KEY=... GH_ENTERPRISE_URL=... GITHUB_TOKEN=... SD_SESSION_ID=... env
+	assert.Equal(t, "env", cmd[0], "first element must be env(1)")
+	// Exactly 4 credential assignments + "env" prefix + "env" command = 6 elements
+	assert.Len(t, cmd, 6, "only 4 credential keys should be passed plus env prefix and command")
+	assert.Contains(t, cmd, "ANTHROPIC_API_KEY=sk-ant-test")
+	assert.Contains(t, cmd, "GITHUB_TOKEN=ghp_test")
+	assert.Contains(t, cmd, "SD_SESSION_ID=sess-123")
+	assert.Contains(t, cmd, "GH_ENTERPRISE_URL=https://gh.example.com")
+	// Non-credential keys must not appear
+	for _, arg := range cmd {
+		assert.NotContains(t, arg, "HOME=", "non-credential keys must be filtered")
+		assert.NotContains(t, arg, "PATH=", "non-credential keys must be filtered")
+		assert.NotContains(t, arg, "RANDOM_VAR=", "non-credential keys must be filtered")
+	}
+}
+
+// Test that exec works when no credentials are configured — command is unchanged.
+func TestExecCommand_NoCredentials(t *testing.T) {
+	_, calls := setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0, Stdout: "ok\n"},
+		nil,
+	)
+
+	// readCredFunc already returns nil from setupExecMemoryTest
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "exec", "myvm", "--", "echo"})
+	err := root.Execute()
+	require.NoError(t, err)
+
+	require.Len(t, *calls, 1)
+	// Without credentials, the command should be passed through unchanged (no env prefix)
+	assert.Equal(t, []string{"echo"}, (*calls)[0].Command, "no credentials should pass command unchanged")
+}
+
+// Test that readCredFunc errors are silently ignored (non-fatal).
+func TestExecCommand_CredentialLoadError(t *testing.T) {
+	_, calls := setupExecMemoryTest(t,
+		map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		backend.ExecResult{ExitCode: 0, Stdout: "ok\n"},
+		nil,
+	)
+
+	readCredFunc = func(_, _ string) (map[string]string, error) {
+		return nil, fmt.Errorf("credentials file not found")
+	}
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "exec", "myvm", "--", "echo"})
+	err := root.Execute()
+	require.NoError(t, err, "credential load errors should not prevent exec")
+	require.Len(t, *calls, 1)
+	// Command should be unchanged since credential loading failed
+	assert.Equal(t, []string{"echo"}, (*calls)[0].Command, "failed credential load should pass command unchanged")
+}
+
+// --- buildEnvCommand unit tests ---
+
+func TestBuildEnvCommand_NoCreds(t *testing.T) {
+	cmd := buildEnvCommand([]string{"echo", "hello"}, nil)
+	assert.Equal(t, []string{"echo", "hello"}, cmd, "nil creds should return original command")
+
+	cmd = buildEnvCommand([]string{"echo", "hello"}, map[string]string{})
+	assert.Equal(t, []string{"echo", "hello"}, cmd, "empty creds should return original command")
+}
+
+func TestBuildEnvCommand_WithCreds(t *testing.T) {
+	creds := map[string]string{
+		"GITHUB_TOKEN":      "ghp_abc",
+		"ANTHROPIC_API_KEY": "sk-ant-xyz",
+	}
+	cmd := buildEnvCommand([]string{"echo", "hello"}, creds)
+	// Keys are sorted: ANTHROPIC_API_KEY before GITHUB_TOKEN
+	assert.Equal(t, []string{
+		"env",
+		"ANTHROPIC_API_KEY=sk-ant-xyz",
+		"GITHUB_TOKEN=ghp_abc",
+		"echo", "hello",
+	}, cmd)
+}
+
+func TestBuildEnvCommand_SingleCred(t *testing.T) {
+	creds := map[string]string{"SD_TOKEN": "tok123"}
+	cmd := buildEnvCommand([]string{"ls", "-la"}, creds)
+	assert.Equal(t, []string{"env", "SD_TOKEN=tok123", "ls", "-la"}, cmd)
+}
+
+// Property: buildEnvCommand always produces deterministic output for same input.
+func TestProperty_BuildEnvCommandDeterministic(t *testing.T) {
+	creds := map[string]string{
+		"GITHUB_TOKEN":      "a",
+		"ANTHROPIC_API_KEY": "b",
+		"SD_SESSION":        "c",
+		"GH_TOKEN":          "d",
+	}
+	first := buildEnvCommand([]string{"cmd"}, creds)
+	for i := 0; i < 10; i++ {
+		result := buildEnvCommand([]string{"cmd"}, creds)
+		assert.Equal(t, first, result, "buildEnvCommand must be deterministic (iteration %d)", i)
+	}
 }
