@@ -95,7 +95,33 @@ Spec -> Spec Review (3 agents) -> Plan -> Plan Review (3 agents) -> Tasks -> Tas
 | 4. Plan Review | 3 agents: architect, critic, qa | All must-fix issues resolved, status=approved |
 | 5. Tasks | Beads created via `bd create` | One bead per plan task, all have acceptance criteria |
 | 6. Task Review | 1 agent verifies completeness | All beads match plan and spec |
-| 7. Implement | Code + tests | Each task includes property-based, unit, and integration tests |
+| 7. Implement | Code + tests + review | See Implementation Process below |
+
+### Implementation Process
+
+Every implementation task follows this process. The orchestrator agent manages it.
+
+```
+1. Create bead (bd create)
+2. Implement in worktree (ntm spawn --worktrees, or Agent tool with isolation)
+3. Run tests -- all must pass
+4. STOP -- do NOT commit. Report "ready for review"
+5. Review: 3 agents (architect, critic, qa) review the diff
+   - Architect: API design, consistency, spec compliance, extensibility
+   - Critic: correctness, edge cases, bugs, security, error handling
+   - QA: test coverage, spec acceptance criteria, property tests, missing tests
+6. Fix must-fix issues from review
+7. Re-run tests
+8. Merge worktree + commit
+9. Close bead (bd close)
+```
+
+**Rules:**
+- Code is NEVER committed without review. Tests passing is necessary but not sufficient.
+- Reviews write findings to `tests/reviews/` for traceability.
+- All must-fix issues must be resolved before merge. Should-fix items tracked as follow-up beads.
+- When using ntm, review agents run in the SAME tmux session as the orchestrator (not a separate window).
+- The orchestrator coordinates: assigns work, triggers reviews, merges results.
 
 ### Testing Requirements
 
