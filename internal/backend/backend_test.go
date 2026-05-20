@@ -65,6 +65,7 @@ func TestBackend_ContextAllMethods(t *testing.T) {
 // TestBackend_VMSerializability verifies VMInfo and SSHConfig are JSON serializable.
 // REQ-003-005, REQ-003-006
 func TestBackend_VMSerializability(t *testing.T) {
+	nowVMInfo := time.Now()
 	vmInfo := VMInfo{
 		Name:      "test-vm",
 		Status:    StatusRunning,
@@ -73,7 +74,7 @@ func TestBackend_VMSerializability(t *testing.T) {
 		Memory:    "8GiB",
 		Disk:      "100GiB",
 		IP:        "127.0.0.1",
-		CreatedAt: time.Now(),
+		CreatedAt: &nowVMInfo,
 	}
 
 	data, err := json.Marshal(vmInfo)

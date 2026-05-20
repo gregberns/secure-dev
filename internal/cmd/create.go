@@ -282,11 +282,18 @@ func doCreateVM(ctx context.Context, f *ui.Formatter, b backend.Backend, name, b
 			Memory:  vmCfg.Memory,
 			Disk:    vmCfg.Disk,
 			Image:   vmCfg.BaseImage,
-			State: config.VMState{
-				Status:      config.VMStatusRunning,
-				CreatedAt:   time.Now(),
-				LastStarted: time.Now(),
-			},
+			// bug-created-at-zero: stamp created_at in UTC at create time.
+			// A5: all audit/state timestamps use UTC for hash-chain
+			// reproducibility across hosts with different TZ. Same `now` is
+			// shared so created_at == last_started exactly for a fresh VM.
+			State: func() config.VMState {
+				now := time.Now().UTC()
+				return config.VMState{
+					Status:      config.VMStatusRunning,
+					CreatedAt:   &now,
+					LastStarted: &now,
+				}
+			}(),
 		}
 		if len(modules) > 0 {
 			vmConfigPersist.Provisions = modules
@@ -299,7 +306,7 @@ func doCreateVM(ctx context.Context, f *ui.Formatter, b backend.Backend, name, b
 	// REQ-004-022: Log VM lifecycle event
 	if al := AuditLog(); al != nil {
 		_ = al.LogEvent(security.EventLogEntry{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			EventType: "vm.create",
 			VMName:    name,
 		})
@@ -377,7 +384,7 @@ func setupSSH(ctx context.Context, f *ui.Formatter, b backend.Backend, name, sdH
 	sshConfigPath := filepath.Join(sshDir, "config")
 	if sshConfigData, err := os.ReadFile(sshConfigPath); err == nil {
 		if ssh.NeedsInclude(sshConfigData) {
-			f.Progress("Warning: ~/.ssh/config does not include 'Include config.d/*'. SSH shortcuts for sd VMs will not work. Add this line to the top of ~/.ssh/config: Include config.d/*")
+			f.Progress("Warning: ~/.ssh/config does not include 'Include config.d/*'. SSH shortcuts for sd VMs will not work. Add this line to the top of ~/.ssh/config: Include config.d/*. Run `sd doctor` to verify the SSH config.")
 		}
 	}
 }

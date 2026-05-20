@@ -23,8 +23,8 @@ Status legend:
 | REQ-004-003 | No default mounts | DONE | `internal/cmd/create.go` defaults to empty mounts; surfaced in status JSON |
 | REQ-004-004 | Read-only mounts by default | PARTIAL | Mount mode parsing exists, but `--mount host:guest:rw` syntax and ro/rw exposure in `sd status --json` need verification (not seen in `gatherMounts`) |
 | REQ-004-005 | Mount path validation | DONE | `internal/security/mount.go` + `sensitive_paths_test.go`; symlink resolution covered |
-| REQ-004-006 | Default-deny egress | PARTIAL | `modules/egress.yaml` exists, but module is NOT in `DefaultModuleNames` — opt-in only. Default VM is NOT default-deny |
-| REQ-004-007 | Default egress allowlist | PARTIAL | `DefaultEgressAllowlist` defined; allowlist not applied to default VMs (see REQ-004-006). Wildcard matching unit-tested |
+| REQ-004-006 | Default-deny egress | DONE (SEC-001 fix) | `modules/egress.yaml` exists AND `DefaultModuleNames` now includes `base`, `ssh-hardening`, `dns-filter`, `egress`. Regression-guard test `TestDefaultModuleNames_SecurityBaseline` fails loudly if `egress` or `dns-filter` is removed |
+| REQ-004-007 | Default egress allowlist | DONE (SEC-001 fix) | `DefaultEgressAllowlist` defined and applied to default VMs via the now-default `egress` module. Wildcard matching unit-tested |
 | REQ-004-008 | User-configurable egress | PARTIAL | `--allow-egress` flag accepted at create; `sd config egress add/remove/list` exists. Live update without restart unverified (egress module only re-runs at provision time) |
 | REQ-004-009 | Egress via iptables | PARTIAL | Implemented in `modules/egress.yaml` but not fired by default; SSH-from-host rule present; integration test absent |
 | REQ-004-010 | DNS-based allowlisting (re-resolution) | PARTIAL | `sd-egress-refresh` systemd timer exists in `modules/egress.yaml` (`OnBootSec=5min`); not validated end-to-end; interval not user-configurable |
@@ -42,7 +42,7 @@ Status legend:
 | REQ-004-022 | Audit: VM lifecycle + hash chain | PARTIAL | Hash chain implemented and verified; `sd audit --verify` exists. **Coverage gap**: `snapshot-create`, `snapshot-restore`, `config-change` events not logged (no `LogEvent` calls in `snapshot.go`, `config.go`, `config_egress.go`). `disconnect` not logged |
 | REQ-004-023 | Sensitive path list configurable | PARTIAL | `MergedSensitivePaths` exists; `sd config set security.sensitive_paths` wired via viper; `sd config get ... --json` source-tagging unverified |
 | REQ-004-024 | Security posture summary | DONE | `sd security status <name>` implemented; writable mount warnings present |
-| REQ-004-025 | Local filtering DNS resolver | PARTIAL | `modules/dns-filter.yaml` installs dnsmasq with allowlist forwarders; but module is opt-in (not in `DefaultModuleNames`). NXDOMAIN behavior + `address=/#/` catch-all need integration test |
+| REQ-004-025 | Local filtering DNS resolver | DONE (SEC-001 fix) | `modules/dns-filter.yaml` installs dnsmasq with allowlist forwarders AND is now in `DefaultModuleNames`. NXDOMAIN behavior + `address=/#/` catch-all still need an end-to-end integration test |
 | REQ-004-026 | SSH port-forwarding restrictions | DONE | `modules/ssh-hardening.yaml` configures `AllowTcpForwarding local`, `GatewayPorts no`, `PermitTunnel no`, `X11Forwarding no`; tested in `modules_test.go` |
 | REQ-004-027 | Agent / X11 forwarding disabled | DONE | `ForwardAgent=no`, `ForwardX11=no` in `connect.go`; SSH config fragment generation in `internal/ssh/` |
 | REQ-004-028 | Download checksum verification | PARTIAL | Module schema supports `checksums`; `ValidateChecksums` enforces presence when downloads exist. Checksums are embedded in inline shell (`sha256sum -c -`) rather than schema-driven; no automatic enforcement separate from the script; `sd doctor` warning for user-defined modules without checksums unverified |

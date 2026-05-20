@@ -245,11 +245,29 @@ func (l *Loader) GetForVM(name string) (*VMConfig, error) {
 			}
 		}
 
-		// Load state section
+		// Load state section.
+		// REQ-005-007: timestamp fields are pointers + omitempty so absence is
+		// distinguishable from a zero/epoch value. Defensive: if a present
+		// timestamp parses to zero (malformed), drop it back to nil (SF-4).
 		result.State.Status = vmViper.GetString("state.status")
-		result.State.CreatedAt = vmViper.GetTime("state.created_at")
-		result.State.LastStarted = vmViper.GetTime("state.last_started")
-		result.State.LastStopped = vmViper.GetTime("state.last_stopped")
+		if vmViper.IsSet("state.created_at") {
+			t := vmViper.GetTime("state.created_at").UTC()
+			if !t.IsZero() {
+				result.State.CreatedAt = &t
+			}
+		}
+		if vmViper.IsSet("state.last_started") {
+			t := vmViper.GetTime("state.last_started").UTC()
+			if !t.IsZero() {
+				result.State.LastStarted = &t
+			}
+		}
+		if vmViper.IsSet("state.last_stopped") {
+			t := vmViper.GetTime("state.last_stopped").UTC()
+			if !t.IsZero() {
+				result.State.LastStopped = &t
+			}
+		}
 
 		// Load backend_meta
 		result.BackendMeta = vmViper.GetStringMap("backend_meta")
@@ -676,6 +694,12 @@ func (l *Loader) ReadVMConfig(name string) (*VMConfig, error) {
 	var cfg VMConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse VM config: %w", err)
+	}
+	if cfg.State.CreatedAt == nil {
+		if fi, statErr := os.Stat(filePath); statErr == nil {
+			t := fi.ModTime().UTC()
+			cfg.State.CreatedAt = &t
+		}
 	}
 	return &cfg, nil
 }

@@ -472,7 +472,7 @@ func TestProperty_VMInfoRoundTrip(t *testing.T) {
 			CPUs:      rapid.IntRange(1, 32).Draw(t, "cpus"),
 			Memory:    "8GiB",
 			Disk:      "100GiB",
-			CreatedAt: time.Now(),
+			CreatedAt: func() *time.Time { t := time.Now(); return &t }(),
 		}
 
 		data, err := json.Marshal(info)

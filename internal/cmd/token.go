@@ -262,7 +262,7 @@ func runTokenRotate(cmd *cobra.Command, args []string) error {
 	// REQ-004-022: Log token lifecycle event
 	if al := AuditLog(); al != nil {
 		_ = al.LogEvent(security.EventLogEntry{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			EventType: "token.rotate",
 			VMName:    vmName,
 		})
@@ -358,7 +358,7 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	// REQ-004-022: Log token lifecycle event
 	if al := AuditLog(); al != nil {
 		_ = al.LogEvent(security.EventLogEntry{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			EventType: "token.revoke",
 			VMName:    vmName,
 		})

@@ -272,7 +272,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	// REQ-004-022: Log VM lifecycle event
 	if al := AuditLog(); al != nil {
 		_ = al.LogEvent(security.EventLogEntry{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			EventType: "vm.connect",
 			VMName:    name,
 		})

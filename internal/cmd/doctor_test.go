@@ -210,12 +210,18 @@ func TestDoctorCommand_JSONOutput_AllPass(t *testing.T) {
 
 	data, ok := result["data"].([]any)
 	require.True(t, ok, "data must be a JSON array")
-	assert.Len(t, data, 10, "should have 4 binary + 1 config + 1 backend + 1 sd_home_permissions + 1 git_credentials + 1 project_security_config + 1 ssh_fragment_security checks")
+	assert.Len(t, data, 11, "should have 4 binary + config + backend + sd_home_permissions + git_credentials + project_security_config + ssh_fragment_security + ssh_config_include checks")
 
 	for _, item := range data {
 		check := item.(map[string]any)
 		assert.Contains(t, check, "name")
 		assert.Contains(t, check, "status")
+		if check["name"] == "ssh_config_include" {
+			// Without a real ~/.ssh/config in the temp HOME, this is a warn.
+			// bug-doctor-ssh-include: warn is not a failure.
+			assert.NotEqual(t, "fail", check["status"], "ssh_config_include must not fail")
+			continue
+		}
 		assert.Equal(t, "pass", check["status"], "check %s should pass", check["name"])
 	}
 }
@@ -260,6 +266,7 @@ func TestDoctorCommand_JSONOutput_SomeFail(t *testing.T) {
 
 	passCount := 0
 	failCount := 0
+	warnCount := 0
 	for _, item := range data {
 		check := item.(map[string]any)
 		switch check["status"].(string) {
@@ -267,10 +274,13 @@ func TestDoctorCommand_JSONOutput_SomeFail(t *testing.T) {
 			passCount++
 		case "fail":
 			failCount++
+		case "warn":
+			warnCount++
 		}
 	}
 	assert.Equal(t, 3, failCount, "limactl, tmux, and backend should fail")
 	assert.Equal(t, 7, passCount, "ssh, rsync, config, sd_home_permissions, git_credentials, project_security_config, ssh_fragment_security checks pass")
+	assert.Equal(t, 1, warnCount, "ssh_config_include is a warn when no ~/.ssh/config exists")
 }
 
 func TestDoctorCommand_NoConfigRequired(t *testing.T) {
@@ -417,14 +427,14 @@ func TestProperty_DoctorJSONAlwaysValid(t *testing.T) {
 
 			data, ok := result["data"].([]any)
 			require.True(t, ok, "data must be an array")
-			assert.Len(t, data, 10, "always 10 checks")
+			assert.Len(t, data, 11, "always 11 checks")
 
 			for _, item := range data {
 				check := item.(map[string]any)
 				assert.Contains(t, check, "name")
 				assert.Contains(t, check, "status")
 				status := check["status"].(string)
-				assert.Contains(t, []string{"pass", "fail"}, status, "status must be pass or fail")
+				assert.Contains(t, []string{"pass", "warn", "fail"}, status, "status must be pass, warn, or fail")
 			}
 		})
 	}
@@ -936,4 +946,52 @@ func TestProperty_GitCredentialsCheckAlwaysValid(t *testing.T) {
 			t.Fatalf("expected pass or fail, got %q", check.Status)
 		}
 	})
+}
+
+// bug-doctor-ssh-include: checkSSHConfigInclude must surface a warn (not fail)
+// when the user's ~/.ssh/config is missing the `Include config.d/*` directive,
+// and a pass when it is present.
+func TestCheckSSHConfigInclude_TableDriven(t *testing.T) {
+	cases := []struct {
+		name       string
+		writeFile  bool
+		content    string
+		wantStatus string
+	}{
+		{"absent_file_warns", false, "", "warn"},
+		{"empty_file_warns", true, "", "warn"},
+		{"include_present_passes", true, "Host *\n  User foo\nInclude config.d/*\n", "pass"},
+		{"wildcard_include_passes", true, "Include ~/.ssh/config.d/*\n", "pass"},
+		{"include_other_dir_warns", true, "Include /etc/ssh/other.conf\n", "warn"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			sshDir := filepath.Join(home, ".ssh")
+			require.NoError(t, os.MkdirAll(sshDir, 0700))
+			if tc.writeFile {
+				require.NoError(t, os.WriteFile(filepath.Join(sshDir, "config"), []byte(tc.content), 0600))
+			}
+			got := checkSSHConfigInclude()
+			assert.Equal(t, "ssh_config_include", got.Name)
+			assert.Equal(t, tc.wantStatus, got.Status, "content=%q", tc.content)
+		})
+	}
+}
+
+// bug-doctor-ssh-include: a `warn` status must NOT mark the overall doctor run
+// as failed. Verify the failure-determination logic treats only `fail` as a
+// blocker.
+func TestDoctor_WarnDoesNotFailOverall(t *testing.T) {
+	// Manually construct a checks slice with a single warn and ensure
+	// formatDoctorOutput renders the `!` indicator.
+	checks := []doctorCheck{
+		{Name: "x", Status: "warn", Message: "advisory"},
+		{Name: "y", Status: "pass", Message: "ok"},
+	}
+	out := formatDoctorOutput(checks)
+	assert.Contains(t, out, "! x: advisory")
+	assert.Contains(t, out, "✓ y: ok")
 }

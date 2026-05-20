@@ -505,7 +505,7 @@ func TestFormatVMDetail_FullInfo(t *testing.T) {
 		Memory:    "8GiB",
 		Disk:      "100GiB",
 		IP:        "192.168.5.15",
-		CreatedAt: time.Date(2026, 3, 29, 10, 0, 0, 0, time.UTC),
+		CreatedAt: func() *time.Time { t := time.Date(2026, 3, 29, 10, 0, 0, 0, time.UTC); return &t }(),
 	}
 	output := formatVMDetail(vm)
 	assert.Contains(t, output, "testvm")

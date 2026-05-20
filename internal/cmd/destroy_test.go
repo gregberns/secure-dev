@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -748,8 +750,8 @@ func TestDestroyCommand_NoSnapshotFlag_JSONOutput(t *testing.T) {
 	assert.Nil(t, data["snapshot_tag"], "snapshot_tag must be absent with --no-snapshot")
 }
 
-// Test that snapshot failure is non-fatal (destroy proceeds).
-func TestDestroyCommand_SnapshotFailure_NonFatal(t *testing.T) {
+// REQ-004-019: snapshot failure before destroy is fatal — destroy MUST NOT proceed.
+func TestDestroyCommand_SnapshotFailure_Fatal_WithoutFlag(t *testing.T) {
 	mb := setupDestroySnapshotTest(t)
 	ctx := context.Background()
 	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{}))
@@ -759,41 +761,33 @@ func TestDestroyCommand_SnapshotFailure_NonFatal(t *testing.T) {
 	root.SetArgs([]string{"destroy", "testvm", "--force"})
 	err := root.Execute()
 
-	require.NoError(t, err, "destroy must succeed despite snapshot failure")
+	require.Error(t, err, "destroy must fail when safety snapshot fails")
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "snapshot_failed", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "aborted")
+	assert.Contains(t, cliErr.Message, "--no-snapshot")
+
+	// VM must still exist — destroy aborted.
 	_, sErr := mb.Status(ctx, "testvm")
-	assert.ErrorIs(t, sErr, backend.ErrVMNotFound, "destroy must proceed after snapshot failure")
+	require.NoError(t, sErr, "VM must still exist after aborted destroy")
 }
 
-// Test that snapshot failure JSON has no snapshot_tag.
-func TestDestroyCommand_SnapshotFailure_JSONNoTag(t *testing.T) {
+// REQ-004-019: snapshot failure bypassed when --no-snapshot is set.
+func TestDestroyCommand_SnapshotFailure_SkippedWithFlag(t *testing.T) {
 	mb := setupDestroySnapshotTest(t)
 	ctx := context.Background()
 	require.NoError(t, mb.Create(ctx, "testvm", backend.VMConfig{}))
-	mb.SetMethodError("snapshotcreate", fmt.Errorf("snapshot error"))
-
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
+	// Even if the backend would fail snapshotcreate, --no-snapshot bypasses the call.
+	mb.SetMethodError("snapshotcreate", fmt.Errorf("should not be called"))
 
 	root := RootCmd()
-	root.SetArgs([]string{"--json", "destroy", "testvm", "--force"})
-	execErr := root.Execute()
+	root.SetArgs([]string{"destroy", "testvm", "--force", "--no-snapshot"})
+	err := root.Execute()
 
-	w.Close()
-	os.Stdout = oldStdout
-
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-
-	require.NoError(t, execErr)
-
-	var result map[string]any
-	err = json.Unmarshal(buf.Bytes(), &result)
-	require.NoError(t, err)
-
-	data := result["data"].(map[string]any)
-	assert.Nil(t, data["snapshot_tag"], "snapshot_tag must be absent on snapshot failure")
+	require.NoError(t, err, "destroy must succeed with --no-snapshot despite snapshot backend error")
+	_, sErr := mb.Status(ctx, "testvm")
+	assert.ErrorIs(t, sErr, backend.ErrVMNotFound, "destroy must proceed when --no-snapshot is passed")
 }
 
 // Test that non-snapshotter backends proceed without auto-snapshot.
@@ -954,8 +948,8 @@ func TestProperty_Destroy_NonSnapshotterJSONNoTag(t *testing.T) {
 	}
 }
 
-// Property: snapshot failure never prevents destroy.
-func TestProperty_Destroy_SnapshotFailureNeverBlocks(t *testing.T) {
+// Property: REQ-004-019 — snapshot failure always aborts destroy (no flag).
+func TestProperty_Destroy_SnapshotFailureAlwaysAborts(t *testing.T) {
 	for _, name := range []string{"vm1", "vm2", "vm3"} {
 		t.Run(name, func(t *testing.T) {
 			mb := setupDestroySnapshotTest(t)
@@ -967,9 +961,13 @@ func TestProperty_Destroy_SnapshotFailureNeverBlocks(t *testing.T) {
 			root.SetArgs([]string{"destroy", name, "--force"})
 			err := root.Execute()
 
-			require.NoError(t, err, "destroy must succeed despite snapshot failure for %q", name)
+			require.Error(t, err, "destroy must abort for %q when snapshot fails", name)
+			cliErr, ok := err.(ui.CLIError)
+			require.True(t, ok)
+			assert.Equal(t, "snapshot_failed", cliErr.Code)
+			// VM must still exist.
 			_, sErr := mb.Status(ctx, name)
-			assert.ErrorIs(t, sErr, backend.ErrVMNotFound, "destroy must be called for %q", name)
+			assert.NoError(t, sErr, "VM %q must still exist after aborted destroy", name)
 		})
 	}
 }
@@ -1016,4 +1014,40 @@ func TestProperty_Destroy_SnapshotTagPrefix(t *testing.T) {
 			assert.Contains(t, tag, "pre-destroy-", "tag must have pre-destroy prefix for %q", name)
 		})
 	}
+}
+
+// Q1 / REQ-004-022: destroy with a snapshotter backend MUST emit a
+// snapshot-create audit event when the safety snapshot succeeds, and a
+// snapshot-create-failed event when it fails.
+func TestDestroy_AuditsSnapshotCreate(t *testing.T) {
+	mb := setupDestroySnapshotTest(t)
+	require.NoError(t, mb.Create(context.Background(), "myvm", backend.VMConfig{}))
+
+	root := RootCmd()
+	root.SetArgs([]string{"destroy", "myvm", "--force"})
+	require.NoError(t, root.Execute())
+
+	// Find audit.log via the configured loader (SD_HOME).
+	sdHome := Loader().SDHome()
+	logPath := filepath.Join(sdHome, "audit.log")
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err, "audit.log must exist after destroy")
+
+	// At least one line must be a snapshot-create event for the VM.
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var sawSnapshotCreate bool
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if jerr := json.Unmarshal([]byte(line), &entry); jerr != nil {
+			continue
+		}
+		if entry["event"] == "snapshot-create" && entry["vm"] == "myvm" {
+			sawSnapshotCreate = true
+		}
+	}
+	assert.True(t, sawSnapshotCreate,
+		"destroy must emit snapshot-create audit event (log: %s)", string(data))
 }

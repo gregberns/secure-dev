@@ -7,11 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"sd/internal/backend"
+	"sd/internal/security"
 	"sd/internal/ui"
 )
+
+// preRestoreSnapshotTag generates the backup snapshot tag created before
+// `sd snapshot restore` applies a snapshot. Overridable in tests.
+// REQ-004-019: backup snapshot before destructive (restore) operation.
+var preRestoreSnapshotTag = func(name string) string {
+	return fmt.Sprintf("pre-restore-%s", time.Now().Format("20060102-150405"))
+}
 
 func init() {
 	snapshotCmd := &cobra.Command{
@@ -60,6 +69,11 @@ Subcommands:
 	}
 	snapshotRestoreCmd.Flags().String("tag", "", "snapshot tag name (required)")
 	snapshotRestoreCmd.MarkFlagRequired("tag")
+	// REQ-004-019: opt-out for the pre-restore backup snapshot. Default false
+	// (i.e., a backup snapshot is created before applying the restore). The
+	// canonical flag name across all destructive operations is --no-snapshot
+	// (matches `sd destroy` and `sd provision`).
+	snapshotRestoreCmd.Flags().Bool("no-snapshot", false, "skip the pre-restore backup snapshot (not recommended)")
 
 	// --- snapshot delete ---
 	snapshotDeleteCmd := &cobra.Command{
@@ -151,8 +165,28 @@ func runSnapshotCreate(cmd *cobra.Command, args []string) error {
 
 	f.Progress(fmt.Sprintf("Creating snapshot %q for VM %q...", tag, name))
 
-	if err := s.SnapshotCreate(cmd.Context(), name, tag); err != nil {
-		if errors.Is(err, backend.ErrVMNotFound) {
+	createErr := s.SnapshotCreate(cmd.Context(), name, tag)
+	// REQ-004-022, Q1: standalone `sd snapshot create` MUST emit a
+	// snapshot-create audit event (success or snapshot-create-failed).
+	if al := AuditLog(); al != nil {
+		meta := map[string]string{
+			"tag":       tag,
+			"operation": "snapshot-create",
+		}
+		eventType := "snapshot-create"
+		if createErr != nil {
+			meta["error"] = createErr.Error()
+			eventType = "snapshot-create-failed"
+		}
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now().UTC(),
+			EventType: eventType,
+			VMName:    name,
+			Metadata:  meta,
+		})
+	}
+	if createErr != nil {
+		if errors.Is(createErr, backend.ErrVMNotFound) {
 			return ui.CLIError{
 				Code:    "vm_not_found",
 				Message: fmt.Sprintf("VM %q does not exist", name),
@@ -160,7 +194,7 @@ func runSnapshotCreate(cmd *cobra.Command, args []string) error {
 		}
 		return ui.CLIError{
 			Code:    "snapshot_failed",
-			Message: fmt.Sprintf("failed to create snapshot %q for VM %q: %v", tag, name, err),
+			Message: fmt.Sprintf("failed to create snapshot %q for VM %q: %v", tag, name, createErr),
 		}
 	}
 
@@ -265,6 +299,49 @@ func runSnapshotRestore(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// REQ-004-019: create a backup snapshot before applying the restore so the
+	// user can undo. Failure is fatal unless --no-snapshot was passed.
+	noBackup, _ := cmd.Flags().GetBool("no-snapshot")
+	backupTag := ""
+	if !noBackup {
+		backupTag = preRestoreSnapshotTag(name)
+		f.Progress(fmt.Sprintf("Creating backup snapshot %q for VM %q before restore...", backupTag, name))
+		backupErr := s.SnapshotCreate(cmd.Context(), name, backupTag)
+		// REQ-004-022: audit backup-snapshot outcome.
+		if al := AuditLog(); al != nil {
+			meta := map[string]string{
+				"tag":       backupTag,
+				"operation": "snapshot-restore",
+			}
+			eventType := "snapshot-create"
+			if backupErr != nil {
+				meta["error"] = backupErr.Error()
+				eventType = "snapshot-create-failed"
+			}
+			_ = al.LogEvent(security.EventLogEntry{
+				Timestamp: time.Now().UTC(),
+				EventType: eventType,
+				VMName:    name,
+				Metadata:  meta,
+			})
+		}
+		if backupErr != nil {
+			if errors.Is(backupErr, backend.ErrVMNotFound) {
+				return ui.CLIError{
+					Code:    "vm_not_found",
+					Message: fmt.Sprintf("VM %q does not exist", name),
+				}
+			}
+			// REQ-004-019: restore MUST NOT proceed if backup snapshot fails.
+			return ui.CLIError{
+				Code: "snapshot_failed",
+				Message: fmt.Sprintf(
+					"failed to create backup snapshot before restore: %v. The restore operation has been aborted. Free disk space and retry, or use --no-snapshot to skip (not recommended).",
+					backupErr),
+			}
+		}
+	}
+
 	f.Progress(fmt.Sprintf("Restoring VM %q to snapshot %q...", name, tag))
 
 	if err := s.SnapshotApply(cmd.Context(), name, tag); err != nil {
@@ -286,15 +363,34 @@ func runSnapshotRestore(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	type snapshotRestoreResult struct {
-		VM   string `json:"vm"`
-		Tag  string `json:"tag"`
+	// REQ-004-022: log the snapshot-restore event.
+	if al := AuditLog(); al != nil {
+		meta := map[string]string{"tag": tag}
+		if backupTag != "" {
+			meta["backup_tag"] = backupTag
+		}
+		_ = al.LogEvent(security.EventLogEntry{
+			Timestamp: time.Now().UTC(),
+			EventType: "snapshot-restore",
+			VMName:    name,
+			Metadata:  meta,
+		})
 	}
 
-	result := snapshotRestoreResult{VM: name, Tag: tag}
+	type snapshotRestoreResult struct {
+		VM        string `json:"vm"`
+		Tag       string `json:"tag"`
+		BackupTag string `json:"backup_tag,omitempty"` // REQ-004-019
+	}
+
+	result := snapshotRestoreResult{VM: name, Tag: tag, BackupTag: backupTag}
 
 	f.SuccessData(result, func() string {
-		return fmt.Sprintf("VM %q restored to snapshot %q.\n", name, tag)
+		msg := fmt.Sprintf("VM %q restored to snapshot %q.", name, tag)
+		if backupTag != "" {
+			msg += fmt.Sprintf(" Backup snapshot %q created.", backupTag)
+		}
+		return msg + "\n"
 	})
 	return nil
 }

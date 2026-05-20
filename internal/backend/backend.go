@@ -21,15 +21,21 @@ const (
 
 // VMInfo describes a VM instance.
 // REQ-003-005
+//
+// Timestamp fields are *time.Time + omitempty so absence (backend doesn't
+// know) is distinguishable from a zero value, and the JSON wire format omits
+// the field entirely rather than emitting null or "0001-01-01T00:00:00Z".
 type VMInfo struct {
-	Name      string    `json:"name"`
-	Status    VMStatus  `json:"status"`
-	Backend   string    `json:"backend"`
-	CPUs      int       `json:"cpus"`
-	Memory    string    `json:"memory"`
-	Disk      string    `json:"disk"`
-	IP        string    `json:"ip,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Name        string     `json:"name"`
+	Status      VMStatus   `json:"status"`
+	Backend     string     `json:"backend"`
+	CPUs        int        `json:"cpus"`
+	Memory      string     `json:"memory"`
+	Disk        string     `json:"disk"`
+	IP          string     `json:"ip,omitempty"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+	LastStarted *time.Time `json:"last_started,omitempty"`
+	LastStopped *time.Time `json:"last_stopped,omitempty"`
 }
 
 // SSHConfig holds the information needed to SSH into a VM.

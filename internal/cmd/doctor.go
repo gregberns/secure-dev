@@ -11,14 +11,17 @@ import (
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+	"sd/internal/ssh"
 	"sd/internal/ui"
 )
 
 // doctorCheck represents a single diagnostic check result.
-// REQ-002-007
+// REQ-002-007. Status is one of "pass", "warn", or "fail". Only "fail"
+// marks the overall doctor run as failed; "warn" is surfaced to the user
+// with an actionable hint but exits 0.
 type doctorCheck struct {
 	Name    string `json:"name"`
-	Status  string `json:"status"` // "pass" or "fail"
+	Status  string `json:"status"` // "pass", "warn", or "fail"
 	Message string `json:"message,omitempty"`
 }
 
@@ -87,10 +90,16 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Check SSH fragment security (REQ-004-027)
 	checks = append(checks, checkSSHFragmentSecurity())
 
-	// Determine overall status
+	// bug-doctor-ssh-include: verify ~/.ssh/config includes the sd config.d
+	// fragments directory; missing Include is a warn (actionable hint), not a
+	// fail, because manually-issued ssh commands work either way.
+	checks = append(checks, checkSSHConfigInclude())
+
+	// Determine overall status. Only "fail" trips the overall failure flag;
+	// "warn" is reported but exits 0.
 	allPassed := true
 	for _, c := range checks {
-		if c.Status != "pass" {
+		if c.Status == "fail" {
 			allPassed = false
 			break
 		}
@@ -398,14 +407,62 @@ func checkSSHFragmentSecurity() doctorCheck {
 	}
 }
 
+// checkSSHConfigInclude verifies that ~/.ssh/config has an `Include config.d/*`
+// directive so the sd-generated SSH fragments take effect. Missing include is
+// reported as a warning (not a failure) \u2014 manual SSH commands work without it
+// but the `sd connect` shortcuts won't.
+// REQ-007-004, bug-doctor-ssh-include.
+func checkSSHConfigInclude() doctorCheck {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return doctorCheck{
+			Name:    "ssh_config_include",
+			Status:  "warn",
+			Message: "cannot determine home directory to check ~/.ssh/config",
+		}
+	}
+	configPath := filepath.Join(home, ".ssh", "config")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return doctorCheck{
+				Name:   "ssh_config_include",
+				Status: "warn",
+				Message: fmt.Sprintf("%s does not exist; create it and add 'Include config.d/*' at the top so 'sd connect' SSH shortcuts work", configPath),
+			}
+		}
+		return doctorCheck{
+			Name:    "ssh_config_include",
+			Status:  "warn",
+			Message: fmt.Sprintf("cannot read %s: %v", configPath, err),
+		}
+	}
+	if ssh.NeedsInclude(data) {
+		return doctorCheck{
+			Name:   "ssh_config_include",
+			Status: "warn",
+			Message: fmt.Sprintf("%s is missing 'Include config.d/*'; add this line to the top so SSH shortcuts for sd VMs work", configPath),
+		}
+	}
+	return doctorCheck{
+		Name:    "ssh_config_include",
+		Status:  "pass",
+		Message: "~/.ssh/config includes config.d fragments",
+	}
+}
+
 // formatDoctorOutput renders the check results as human-readable output.
+// pass -> \u2713, warn -> !, fail -> \u2717.
 func formatDoctorOutput(checks []doctorCheck) string {
 	var output string
 	for _, c := range checks {
 		var indicator string
-		if c.Status == "pass" {
+		switch c.Status {
+		case "pass":
 			indicator = "\u2713" // checkmark
-		} else {
+		case "warn":
+			indicator = "!"
+		default:
 			indicator = "\u2717" // ballot X
 		}
 		output += fmt.Sprintf("%s %s: %s\n", indicator, c.Name, c.Message)

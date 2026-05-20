@@ -78,12 +78,17 @@ const setupComment = `# Setup commands run after packages are installed (as non-
 `
 
 // initResult is the structured output for the init command.
+// A2 / bug-init-not-idempotent: one envelope for all branches so agents can
+// parse a single schema. `action` is always present and is one of
+// "created" | "overwrote" | "noop". For the noop branch, `name`/`modules`
+// are empty/null and `path` always points at the existing file.
 type initResult struct {
 	Path     string   `json:"path"`
 	Name     string   `json:"name"`
 	Modules  []string `json:"modules"`
 	Detected string   `json:"detected,omitempty"` // detected project type
 	Repo     string   `json:"repo,omitempty"`
+	Action   string   `json:"action"` // "created" | "overwrote" | "noop"
 }
 
 // runInit executes the init command.
@@ -104,14 +109,29 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	sdYamlPath := filepath.Join(cwd, config.ProjectConfigFile)
 
-	// Check for existing .sd.yaml
+	// Check for existing .sd.yaml.
+	// bug-init-not-idempotent: when .sd.yaml already exists and --force was
+	// not passed, sd init is a no-op that exits 0 so agents can call it
+	// defensively. With --force, the file is overwritten (prior behavior).
 	force, _ := cmd.Flags().GetBool("force")
+	existed := false
 	if !force {
 		if _, err := os.Stat(sdYamlPath); err == nil {
-			return ui.CLIError{
-				Code:    "file_exists",
-				Message: fmt.Sprintf("%s already exists; use --force to overwrite", sdYamlPath),
+			// Unified envelope: noop branch shares the same schema as create/overwrite.
+			f.SuccessData(initResult{
+				Path:    sdYamlPath,
+				Name:    "",
+				Modules: []string{},
+				Action:  "noop",
+			}, nil)
+			if !f.JSONMode() {
+				fmt.Fprintf(os.Stderr, "sd: %s already exists at %s (use --force to overwrite)\n", config.ProjectConfigFile, sdYamlPath)
 			}
+			return nil
+		}
+	} else {
+		if _, err := os.Stat(sdYamlPath); err == nil {
+			existed = true
 		}
 	}
 
@@ -168,12 +188,17 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	action := "created"
+	if existed {
+		action = "overwrote"
+	}
 	result := initResult{
 		Path:     sdYamlPath,
 		Name:     vmName,
 		Modules:  modules,
 		Detected: detected,
 		Repo:     repoURL,
+		Action:   action,
 	}
 
 	f.SuccessData(result, func() string {

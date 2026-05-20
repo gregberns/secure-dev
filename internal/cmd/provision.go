@@ -1,12 +1,18 @@
 // Package cmd implements the provision command and its subcommands.
 // REQ-006-001: Built-in module listing.
 // REQ-006-010: Re-provisioning existing VMs.
+// REQ-004-019: Auto-snapshot before destructive operations (re-provisioning).
+// REQ-006-005: Capture per-script stdout/stderr into a provisioning log.
 package cmd
 
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"context"
 
@@ -20,6 +26,32 @@ import (
 // Overridden in tests with a digital twin.
 var loadBuiltinModules = provision.LoadBuiltinModules
 
+// autoProvisionSnapshotTag generates a timestamp-based snapshot tag for
+// pre-provision snapshots. Overridden in tests for determinism. REQ-004-019.
+var autoProvisionSnapshotTag = func(name string) string {
+	return fmt.Sprintf("pre-provision-%s", time.Now().Format("20060102-150405"))
+}
+
+// openProvisionLog opens (creating if necessary) the per-VM provisioning log
+// file at <sdHome>/vms/<name>/provision.log, in append mode. Overridden in
+// tests. Returns the file (caller must Close) and the resolved path.
+// REQ-006-005.
+var openProvisionLog = func(sdHome, name string) (io.WriteCloser, string, error) {
+	dir := filepath.Join(sdHome, "vms", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, "", err
+	}
+	path := filepath.Join(dir, "provision.log")
+	// REQ-006-005, REQ-004-024: 0o600 so even with redaction in place the log
+	// is not world-readable (it may still contain command paths, hostnames,
+	// or other sensitive context).
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, path, err
+	}
+	return f, path, nil
+}
+
 func init() {
 	provisionCmd := &cobra.Command{
 		Use:   "provision <vm> [--modules <list>]",
@@ -29,12 +61,20 @@ func init() {
 If no modules are specified, all configured modules are provisioned.
 Use --modules to provision only specific modules (plus their dependencies).
 
+Before re-provisioning, a safety snapshot is automatically created so the VM
+can be rolled back if a module breaks it. Use --no-snapshot to skip the
+snapshot (REQ-004-019).
+
 Subcommands:
   list              List available provisioning modules`,
 		GroupID: "provisioning",
 		RunE:    runProvision,
 	}
 	provisionCmd.Flags().String("modules", "", "comma-separated list of modules to provision")
+	// REQ-004-019: opt out of auto-snapshot before re-provisioning. The
+	// canonical flag name across all destructive operations is --no-snapshot
+	// (matches `sd destroy` and `sd snapshot restore`).
+	provisionCmd.Flags().Bool("no-snapshot", false, "skip automatic safety snapshot before re-provisioning")
 
 	// --- provision list ---
 	provisionListCmd := &cobra.Command{
@@ -51,6 +91,8 @@ Subcommands:
 
 // runProvision executes the provision command.
 // REQ-006-010: Re-provision existing VMs.
+// REQ-004-019: Auto-snapshot before re-provisioning (opt-out via --no-snapshot).
+// REQ-006-005: Capture script stdout/stderr into a per-VM provisioning log.
 func runProvision(cmd *cobra.Command, args []string) error {
 	f := Formatter()
 	if f == nil {
@@ -155,7 +197,43 @@ func runProvision(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// REQ-004-019: Auto-snapshot before re-provisioning. `sd provision`
+	// always operates on an existing, running VM (initial provisioning
+	// happens inside `sd create`), so this is always a re-provision.
+	// Snapshot failure is fatal unless --no-snapshot is set.
+	noSnapshot, _ := cmd.Flags().GetBool("no-snapshot")
+	snapshotTag := ""
+	if !noSnapshot {
+		if s, ok := b.(backend.Snapshotter); ok {
+			snapshotTag = autoProvisionSnapshotTag(name)
+			f.Progress(fmt.Sprintf("Creating safety snapshot %q for VM %q...", snapshotTag, name))
+			if err := s.SnapshotCreate(cmd.Context(), name, snapshotTag); err != nil {
+				return ui.CLIError{
+					Code:    "snapshot_failed",
+					Message: fmt.Sprintf("failed to create safety snapshot %q for VM %q: %v (pass --no-snapshot to skip)", snapshotTag, name, err),
+				}
+			}
+		}
+	}
+
 	f.Progress(fmt.Sprintf("Provisioning VM %q with %d module(s)...", name, len(resolved)))
+
+	// REQ-006-005: Open per-VM provisioning log for diagnostic history.
+	var logWriter io.Writer
+	var logPath string
+	if l := Loader(); l != nil {
+		lf, path, lerr := openProvisionLog(l.SDHome(), name)
+		if lerr != nil {
+			// Log open failure is non-fatal; we just lose history this run.
+			f.Progress(fmt.Sprintf("Warning: failed to open provision log: %v", lerr))
+		} else {
+			defer lf.Close()
+			logWriter = lf
+			logPath = path
+			header := fmt.Sprintf("=== sd provision %s @ %s ===\n", name, time.Now().UTC().Format(time.RFC3339))
+			_, _ = lf.Write([]byte(header))
+		}
+	}
 
 	// Execute provisioning via backend Exec
 	execFn := func(ctx context.Context, vmName string, command []string) (string, string, int, error) {
@@ -166,22 +244,30 @@ func runProvision(cmd *cobra.Command, args []string) error {
 		return result.Stdout, result.Stderr, result.ExitCode, nil
 	}
 
-	result := provision.Provision(cmd.Context(), execFn, name, resolved)
+	result := provision.ProvisionWithOptions(cmd.Context(), execFn, name, resolved, provision.Options{LogWriter: logWriter})
 	if result.Failed {
+		// REQ-006-005: surface script stdout/stderr in the error message and
+		// point the user at the full log for context.
+		msg := fmt.Sprintf("module %q failed: %s", result.Module, result.Error)
+		if logPath != "" {
+			msg += fmt.Sprintf("\n(full log: %s)", logPath)
+		}
 		return ui.CLIError{
 			Code:    "provision_script_failed",
-			Message: fmt.Sprintf("module %q failed: %s", result.Module, result.Error),
+			Message: msg,
 		}
 	}
 
 	type provisionSuccess struct {
-		VM          string                       `json:"vm"`
+		VM          string                            `json:"vm"`
 		Modules     []provision.ModuleExecutionStatus `json:"modules"`
+		SnapshotTag string                            `json:"snapshot_tag,omitempty"`
 	}
 
 	successData := provisionSuccess{
-		VM:      name,
-		Modules: result.State.Modules,
+		VM:          name,
+		Modules:     result.State.Modules,
+		SnapshotTag: snapshotTag,
 	}
 
 	f.SuccessData(successData, func() string {
@@ -191,7 +277,11 @@ func runProvision(cmd *cobra.Command, args []string) error {
 				completed = append(completed, m.Name)
 			}
 		}
-		return fmt.Sprintf("Provisioned VM %q with modules: %s\n", name, strings.Join(completed, ", "))
+		msg := fmt.Sprintf("Provisioned VM %q with modules: %s", name, strings.Join(completed, ", "))
+		if snapshotTag != "" {
+			msg += fmt.Sprintf(" (safety snapshot %q created)", snapshotTag)
+		}
+		return msg + "\n"
 	})
 	return nil
 }

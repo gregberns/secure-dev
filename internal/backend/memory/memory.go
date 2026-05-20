@@ -325,6 +325,7 @@ func (b *Backend) List(ctx context.Context) ([]backend.VMInfo, error) {
 	}
 	result := make([]backend.VMInfo, 0, len(b.vms))
 	for _, vm := range b.vms {
+		vmCreated := vm.createdAt
 		result = append(result, backend.VMInfo{
 			Name:      vm.name,
 			Status:    vm.status,
@@ -333,7 +334,7 @@ func (b *Backend) List(ctx context.Context) ([]backend.VMInfo, error) {
 			Memory:    vm.config.Memory,
 			Disk:      vm.config.Disk,
 			IP:        vm.ip,
-			CreatedAt: vm.createdAt,
+			CreatedAt: &vmCreated,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {

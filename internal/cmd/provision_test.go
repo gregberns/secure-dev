@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -513,7 +514,7 @@ func TestProvisioner_SystemModeUsesSudo(t *testing.T) {
 	result := provision.Provision(context.Background(), execFn, "vm", mods)
 	assert.False(t, result.Failed)
 	assert.Equal(t, []string{"sudo", "bash", "-c"}, capturedCmd[:3])
-	assert.Contains(t, capturedCmd[3], "set -eux -o pipefail")
+	assert.Contains(t, capturedCmd[3], "set -eu -o pipefail")
 	assert.Contains(t, capturedCmd[3], "apt-get install -y curl")
 }
 
@@ -552,7 +553,7 @@ func TestProvisioner_ScriptPreamble(t *testing.T) {
 	}
 
 	provision.Provision(context.Background(), execFn, "vm", mods)
-	assert.True(t, strings.HasPrefix(capturedScript, "set -eux -o pipefail\n"))
+	assert.True(t, strings.HasPrefix(capturedScript, "set -eu -o pipefail\n"))
 }
 
 func TestProvisioner_ScriptExitNonZero(t *testing.T) {
@@ -941,6 +942,288 @@ func TestProvisioner_PreambleApplied(t *testing.T) {
 	}
 
 	provision.Provision(context.Background(), execFn, "vm", mods)
-	assert.True(t, strings.HasPrefix(captured, "set -eux -o pipefail\n"))
+	assert.True(t, strings.HasPrefix(captured, "set -eu -o pipefail\n"))
 	assert.Contains(t, captured, "echo hello")
+}
+
+// --- REQ-004-019, REQ-006-005: re-provision auto-snapshot + provision log ---
+
+// snapshotterProvisionBackend extends mockProvisionBackend with the
+// backend.Snapshotter interface so the provision command will attempt the
+// pre-provision safety snapshot path.
+type snapshotterProvisionBackend struct {
+	*mockProvisionBackend
+	snapshots   []string
+	snapshotErr error
+}
+
+func (s *snapshotterProvisionBackend) SnapshotCreate(_ context.Context, _ string, tag string) error {
+	if s.snapshotErr != nil {
+		return s.snapshotErr
+	}
+	s.snapshots = append(s.snapshots, tag)
+	return nil
+}
+
+func (s *snapshotterProvisionBackend) SnapshotList(_ context.Context, _ string) ([]backend.SnapshotInfo, error) {
+	return nil, nil
+}
+
+func (s *snapshotterProvisionBackend) SnapshotDelete(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (s *snapshotterProvisionBackend) SnapshotApply(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+// setupProvisionSnapshotTest wires a snapshotter-capable backend with a fixed
+// snapshot tag for deterministic assertions, and resets the
+// --no-snapshot flag between tests.
+func setupProvisionSnapshotTest(t *testing.T, sb *snapshotterProvisionBackend) {
+	t.Helper()
+	setupProvisionTest(t, sb.mockProvisionBackend)
+
+	// Replace the getBackendFunc again to return the *snapshotter* wrapper
+	// (setupProvisionTest already redirected it, but to the inner mock).
+	origGetBackend := getBackendFunc
+	getBackendFunc = func(_ string) (backend.Backend, error) { return sb, nil }
+	t.Cleanup(func() { getBackendFunc = origGetBackend })
+
+	// Reset --no-snapshot between tests.
+	root := RootCmd()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "provision" {
+			_ = cmd.Flags().Set("no-snapshot", "false")
+			break
+		}
+	}
+
+	// Deterministic snapshot tag.
+	origTag := autoProvisionSnapshotTag
+	autoProvisionSnapshotTag = func(_ string) string { return "pre-provision-20260520-120000" }
+	t.Cleanup(func() { autoProvisionSnapshotTag = origTag })
+}
+
+func TestProvisionCommand_NoProvisionSnapshotFlag_Registered(t *testing.T) {
+	newRootTestEnv(t)
+	root := RootCmd()
+	cmd, _, err := root.Find([]string{"provision"})
+	require.NoError(t, err)
+
+	flag := cmd.Flags().Lookup("no-snapshot")
+	require.NotNil(t, flag, "provision must have --no-snapshot flag")
+	assert.Equal(t, "false", flag.DefValue)
+}
+
+// REQ-004-019: re-provision creates a safety snapshot by default.
+func TestProvisionCommand_ReProvision_CreatesSnapshot(t *testing.T) {
+	sb := &snapshotterProvisionBackend{
+		mockProvisionBackend: &mockProvisionBackend{
+			name:      "test",
+			available: true,
+			statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		},
+	}
+	setupProvisionSnapshotTest(t, sb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"provision", "myvm"})
+	require.NoError(t, root.Execute())
+
+	require.Len(t, sb.snapshots, 1, "expected exactly one pre-provision snapshot")
+	assert.Equal(t, "pre-provision-20260520-120000", sb.snapshots[0])
+}
+
+// REQ-004-019: snapshot tag is surfaced in JSON output.
+func TestProvisionCommand_ReProvision_SnapshotTagInJSON(t *testing.T) {
+	sb := &snapshotterProvisionBackend{
+		mockProvisionBackend: &mockProvisionBackend{
+			name:      "test",
+			available: true,
+			statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		},
+	}
+	setupProvisionSnapshotTest(t, sb)
+
+	output := captureStdout(t, func() {
+		root := RootCmd()
+		root.SetArgs([]string{"--json", "provision", "myvm"})
+		require.NoError(t, root.Execute())
+	})
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(output), &result))
+	data := result["data"].(map[string]interface{})
+	assert.Equal(t, "pre-provision-20260520-120000", data["snapshot_tag"])
+}
+
+// REQ-004-019: --no-snapshot skips the auto-snapshot.
+func TestProvisionCommand_NoProvisionSnapshotFlag_SkipsSnapshot(t *testing.T) {
+	sb := &snapshotterProvisionBackend{
+		mockProvisionBackend: &mockProvisionBackend{
+			name:      "test",
+			available: true,
+			statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		},
+	}
+	setupProvisionSnapshotTest(t, sb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"provision", "myvm", "--no-snapshot"})
+	require.NoError(t, root.Execute())
+
+	assert.Empty(t, sb.snapshots, "no snapshot should have been created")
+}
+
+// REQ-004-019: snapshot failure is fatal unless --no-snapshot was passed.
+func TestProvisionCommand_SnapshotFailure_Fatal(t *testing.T) {
+	sb := &snapshotterProvisionBackend{
+		mockProvisionBackend: &mockProvisionBackend{
+			name:      "test",
+			available: true,
+			statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		},
+		snapshotErr: fmt.Errorf("disk full"),
+	}
+	setupProvisionSnapshotTest(t, sb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"provision", "myvm"})
+	err := root.Execute()
+	require.Error(t, err)
+
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "snapshot_failed", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "disk full")
+	assert.Contains(t, cliErr.Message, "--no-snapshot")
+	// No exec calls should have occurred — we aborted before provisioning.
+	assert.Empty(t, sb.mockProvisionBackend.execCalls, "must not provision if snapshot failed")
+}
+
+// REQ-004-019: snapshot failure is non-fatal if user opted out with the flag.
+func TestProvisionCommand_SnapshotFailure_IgnoredWithFlag(t *testing.T) {
+	sb := &snapshotterProvisionBackend{
+		mockProvisionBackend: &mockProvisionBackend{
+			name:      "test",
+			available: true,
+			statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		},
+		snapshotErr: fmt.Errorf("disk full"),
+	}
+	setupProvisionSnapshotTest(t, sb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"provision", "myvm", "--no-snapshot"})
+	require.NoError(t, root.Execute())
+	assert.Empty(t, sb.snapshots)
+}
+
+// REQ-006-005: provision.log file grows across runs (append, with header).
+func TestProvisionCommand_ProvisionLogFileGrows(t *testing.T) {
+	mb := &mockProvisionBackend{
+		name:      "test",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		execResults: []backend.ExecResult{
+			{ExitCode: 0, Stdout: "first-run-stdout", Stderr: "first-run-stderr"},
+		},
+	}
+	tmp := setupProvisionTest_returningHome(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"provision", "myvm", "--no-snapshot"})
+	require.NoError(t, root.Execute())
+
+	logPath := filepath.Join(tmp, "vms", "myvm", "provision.log")
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err, "provision.log should exist")
+	firstLen := len(data)
+	require.Greater(t, firstLen, 0, "provision.log should not be empty")
+	assert.Contains(t, string(data), "=== sd provision myvm @")
+	assert.Contains(t, string(data), "first-run-stdout")
+	assert.Contains(t, string(data), "first-run-stderr")
+	// REQ-006-005, REQ-004-024: log must be 0o600 to limit credential leak surface.
+	fi, statErr := os.Stat(logPath)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm(), "provision.log must be 0o600")
+
+	// Second invocation must append, not truncate.
+	mb.execCalls = nil
+	mb.execResults = []backend.ExecResult{
+		{ExitCode: 0, Stdout: "second-run-stdout", Stderr: ""},
+	}
+	root.SetArgs([]string{"provision", "myvm", "--no-snapshot"})
+	require.NoError(t, root.Execute())
+
+	data2, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Greater(t, len(data2), firstLen, "provision.log must grow on second run")
+	// Both runs are present.
+	assert.Contains(t, string(data2), "first-run-stdout")
+	assert.Contains(t, string(data2), "second-run-stdout")
+}
+
+// REQ-006-005: script-failure error surfaces stderr tail and log path.
+func TestProvisionCommand_ScriptFailure_ErrorIncludesStderr(t *testing.T) {
+	mb := &mockProvisionBackend{
+		name:      "test",
+		available: true,
+		statusMap: map[string]backend.VMStatus{"myvm": backend.StatusRunning},
+		execResults: []backend.ExecResult{
+			{ExitCode: 2, Stderr: "apt: package not found"},
+		},
+	}
+	tmp := setupProvisionTest_returningHome(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"provision", "myvm", "--no-snapshot"})
+	err := root.Execute()
+	require.Error(t, err)
+
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "provision_script_failed", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "apt: package not found")
+	assert.Contains(t, cliErr.Message, "full log:")
+	assert.Contains(t, cliErr.Message, filepath.Join(tmp, "vms", "myvm", "provision.log"))
+}
+
+// setupProvisionTest_returningHome is like setupProvisionTest but returns the
+// SD_HOME directory created for the test (so log-file assertions can locate
+// provision.log).
+func setupProvisionTest_returningHome(t *testing.T, mb *mockProvisionBackend) string {
+	t.Helper()
+	tmp := newRootTestEnv(t)
+
+	origGetBackend := getBackendFunc
+	getBackendFunc = func(_ string) (backend.Backend, error) { return mb, nil }
+	origValidateBackend := validateBackendFunc
+	validateBackendFunc = func(_ string) error { return nil }
+	t.Cleanup(func() {
+		getBackendFunc = origGetBackend
+		validateBackendFunc = origValidateBackend
+	})
+
+	root := RootCmd()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "provision" {
+			_ = cmd.Flags().Set("modules", "")
+			_ = cmd.Flags().Set("no-snapshot", "false")
+			break
+		}
+	}
+
+	origLoad := loadBuiltinModules
+	loadBuiltinModules = func() ([]provision.Module, error) {
+		return []provision.Module{
+			{Name: "base", Description: "Base", Scripts: []provision.Script{
+				{Mode: provision.ModeSystem, Script: "echo base"},
+			}},
+		}, nil
+	}
+	t.Cleanup(func() { loadBuiltinModules = origLoad })
+
+	return tmp
 }

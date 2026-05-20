@@ -98,7 +98,10 @@ func runList(cmd *cobra.Command, args []string) error {
 		vms = []backend.VMInfo{}
 	}
 
-	// REQ-001-011: Detect orphaned VM state
+	// REQ-001-011: Detect orphaned VM state.
+	// bug-no-prune-command: also emit a single hint pointing users at
+	// `sd prune` so the warning is actionable.
+	orphans := 0
 	if l := Loader(); l != nil {
 		sdHome := l.SDHome()
 		vmsDir := filepath.Join(sdHome, "vms")
@@ -116,8 +119,28 @@ func runList(cmd *cobra.Command, args []string) error {
 					}
 				}
 				if !found {
+					orphans++
 					f.Progress(fmt.Sprintf("Warning: orphaned VM state for %q in %s (no matching VM in backend)", vmName, vmsDir))
 				}
+			}
+		}
+	}
+	if orphans > 0 {
+		// One actionable hint per invocation (not per orphan).
+		f.Progress(fmt.Sprintf("(%d orphan state director%s found, run `sd prune` to clean)",
+			orphans, pluralIES(orphans)))
+	}
+
+	// bug-created-at-zero: overlay created_at from the persisted state file
+	// when the backend itself does not report a timestamp. Both VMState.CreatedAt
+	// and VMInfo.CreatedAt are *time.Time so absence stays absent.
+	if l := Loader(); l != nil {
+		for i := range vms {
+			if vms[i].CreatedAt != nil {
+				continue
+			}
+			if vmCfg, err := l.ReadVMConfig(vms[i].Name); err == nil && vmCfg.State.CreatedAt != nil {
+				vms[i].CreatedAt = vmCfg.State.CreatedAt
 			}
 		}
 	}
@@ -127,6 +150,14 @@ func runList(cmd *cobra.Command, args []string) error {
 	})
 
 	return nil
+}
+
+// pluralIES returns "y" when n == 1 (so "directory") or "ies" otherwise.
+func pluralIES(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
 }
 
 // formatVMTable renders VM info as a human-readable table.

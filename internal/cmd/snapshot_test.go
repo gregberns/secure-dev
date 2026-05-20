@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,13 +23,13 @@ import (
 // It implements backend.Backend and backend.Snapshotter, recording all
 // snapshot calls for assertions.
 type mockSnapshotBackend struct {
-	name       string
-	available  bool
-	snapshots  map[string]map[string]backend.SnapshotInfo // vm -> tag -> info
-	createErr  error
-	applyErr   error
-	deleteErr  error
-	listErr    error
+	name      string
+	available bool
+	snapshots map[string]map[string]backend.SnapshotInfo // vm -> tag -> info
+	createErr error
+	applyErr  error
+	deleteErr error
+	listErr   error
 	// Recording of calls
 	created []snapCall
 	applied []snapCall
@@ -57,8 +59,8 @@ func (m *mockSnapshotBackend) Available() error {
 func (m *mockSnapshotBackend) Create(_ context.Context, name string, _ backend.VMConfig) error {
 	return nil
 }
-func (m *mockSnapshotBackend) Start(_ context.Context, _ string) error  { return nil }
-func (m *mockSnapshotBackend) Stop(_ context.Context, _ string) error   { return nil }
+func (m *mockSnapshotBackend) Start(_ context.Context, _ string) error   { return nil }
+func (m *mockSnapshotBackend) Stop(_ context.Context, _ string) error    { return nil }
 func (m *mockSnapshotBackend) Destroy(_ context.Context, _ string) error { return nil }
 func (m *mockSnapshotBackend) Status(_ context.Context, name string) (backend.VMStatus, error) {
 	if _, ok := m.snapshots[name]; ok {
@@ -155,8 +157,8 @@ func (m *mockNoSnapshotterBackend) Available() error {
 func (m *mockNoSnapshotterBackend) Create(_ context.Context, _ string, _ backend.VMConfig) error {
 	return nil
 }
-func (m *mockNoSnapshotterBackend) Start(_ context.Context, _ string) error  { return nil }
-func (m *mockNoSnapshotterBackend) Stop(_ context.Context, _ string) error   { return nil }
+func (m *mockNoSnapshotterBackend) Start(_ context.Context, _ string) error   { return nil }
+func (m *mockNoSnapshotterBackend) Stop(_ context.Context, _ string) error    { return nil }
 func (m *mockNoSnapshotterBackend) Destroy(_ context.Context, _ string) error { return nil }
 func (m *mockNoSnapshotterBackend) Status(_ context.Context, _ string) (backend.VMStatus, error) {
 	return backend.StatusRunning, nil
@@ -182,6 +184,10 @@ func setupSnapshotTest(t *testing.T, mb *mockSnapshotBackend) {
 		if cmd.Name() == "snapshot" {
 			for _, sub := range cmd.Commands() {
 				_ = sub.Flags().Set("tag", "")
+				// Reset restore-specific flag if present.
+				if f := sub.Flags().Lookup("no-snapshot"); f != nil {
+					_ = sub.Flags().Set("no-snapshot", "false")
+				}
 			}
 			break
 		}
@@ -622,7 +628,7 @@ func TestSnapshotRestore_BackendError(t *testing.T) {
 	setupSnapshotTest(t, mb)
 
 	root := RootCmd()
-	root.SetArgs([]string{"snapshot", "restore", "testvm", "--tag", "v1"})
+	root.SetArgs([]string{"snapshot", "restore", "testvm", "--tag", "v1", "--no-snapshot"})
 	err := root.Execute()
 
 	require.Error(t, err)
@@ -630,6 +636,122 @@ func TestSnapshotRestore_BackendError(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "snapshot_failed", cliErr.Code)
 	assert.Contains(t, cliErr.Message, "corrupted snapshot")
+}
+
+// withFixedPreRestoreTag installs a deterministic backup-snapshot tag generator
+// for the duration of the test. REQ-004-019.
+func withFixedPreRestoreTag(t *testing.T, tag string) {
+	t.Helper()
+	orig := preRestoreSnapshotTag
+	preRestoreSnapshotTag = func(string) string { return tag }
+	t.Cleanup(func() { preRestoreSnapshotTag = orig })
+}
+
+// REQ-004-019: a pre-restore backup snapshot is created by default.
+func TestSnapshotRestore_BackupSnapshotCreated(t *testing.T) {
+	withFixedPreRestoreTag(t, "pre-restore-20260520-101010")
+	mb := newMockSnapshotBackend()
+	addVMToMock(mb, "testvm")
+	mb.snapshots["testvm"]["v1"] = backend.SnapshotInfo{Name: "v1"}
+	setupSnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"snapshot", "restore", "testvm", "--tag", "v1"})
+	require.NoError(t, root.Execute())
+
+	// Backup snapshot must have been created before apply.
+	require.Len(t, mb.created, 1, "exactly one backup snapshot must be created")
+	assert.Equal(t, "testvm", mb.created[0].vm)
+	assert.Equal(t, "pre-restore-20260520-101010", mb.created[0].tag)
+	require.Len(t, mb.applied, 1)
+	assert.Equal(t, "v1", mb.applied[0].tag)
+}
+
+// REQ-004-019: --no-snapshot skips the pre-restore snapshot.
+func TestSnapshotRestore_BackupSnapshotSkippedWithFlag(t *testing.T) {
+	withFixedPreRestoreTag(t, "pre-restore-should-not-appear")
+	mb := newMockSnapshotBackend()
+	addVMToMock(mb, "testvm")
+	mb.snapshots["testvm"]["v1"] = backend.SnapshotInfo{Name: "v1"}
+	setupSnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"snapshot", "restore", "testvm", "--tag", "v1", "--no-snapshot"})
+	require.NoError(t, root.Execute())
+
+	assert.Len(t, mb.created, 0, "no backup snapshot must be created with --no-snapshot")
+	require.Len(t, mb.applied, 1)
+}
+
+// REQ-004-019: backup snapshot failure is fatal — restore MUST NOT proceed.
+func TestSnapshotRestore_BackupSnapshotFailure_Fatal(t *testing.T) {
+	withFixedPreRestoreTag(t, "pre-restore-20260520-101010")
+	mb := newMockSnapshotBackend()
+	addVMToMock(mb, "testvm")
+	mb.snapshots["testvm"]["v1"] = backend.SnapshotInfo{Name: "v1"}
+	mb.createErr = fmt.Errorf("disk full")
+	setupSnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"snapshot", "restore", "testvm", "--tag", "v1"})
+	err := root.Execute()
+
+	require.Error(t, err)
+	cliErr, ok := err.(ui.CLIError)
+	require.True(t, ok)
+	assert.Equal(t, "snapshot_failed", cliErr.Code)
+	assert.Contains(t, cliErr.Message, "aborted")
+	assert.Contains(t, cliErr.Message, "--no-snapshot")
+	// Restore must not have been applied.
+	assert.Len(t, mb.applied, 0, "SnapshotApply must NOT be called when backup fails")
+}
+
+// REQ-004-019: backup snapshot failure is bypassed when --no-snapshot is set.
+func TestSnapshotRestore_BackupSnapshotFailure_SkippedWithFlag(t *testing.T) {
+	mb := newMockSnapshotBackend()
+	addVMToMock(mb, "testvm")
+	mb.snapshots["testvm"]["v1"] = backend.SnapshotInfo{Name: "v1"}
+	mb.createErr = fmt.Errorf("should not be called")
+	setupSnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"snapshot", "restore", "testvm", "--tag", "v1", "--no-snapshot"})
+	require.NoError(t, root.Execute())
+
+	assert.Len(t, mb.created, 0)
+	require.Len(t, mb.applied, 1, "restore must proceed when --no-snapshot is passed")
+}
+
+// REQ-004-019: backup_tag is included in JSON output.
+func TestSnapshotRestore_BackupTag_JSONOutput(t *testing.T) {
+	withFixedPreRestoreTag(t, "pre-restore-20260520-101010")
+	mb := newMockSnapshotBackend()
+	addVMToMock(mb, "testvm")
+	mb.snapshots["testvm"]["v1"] = backend.SnapshotInfo{Name: "v1"}
+	setupSnapshotTest(t, mb)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "snapshot", "restore", "testvm", "--tag", "v1"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &result))
+
+	data := result["data"].(map[string]any)
+	assert.Equal(t, "v1", data["tag"])
+	assert.Equal(t, "pre-restore-20260520-101010", data["backup_tag"])
 }
 
 // ========== snapshot delete tests ==========
@@ -1117,4 +1239,81 @@ func TestProperty_SnapshotDeleteNonexistentSnapshotReturnsCode(t *testing.T) {
 			assert.Equal(t, "snapshot_not_found", cliErr.Code)
 		})
 	}
+}
+
+// readAuditEvents reads audit.log under SD_HOME and returns parsed JSONL entries.
+func readAuditEvents(t *testing.T) []map[string]any {
+	t.Helper()
+	sdHome := os.Getenv("SD_HOME")
+	if l := Loader(); l != nil && l.SDHome() != "" {
+		sdHome = l.SDHome()
+	}
+	logPath := filepath.Join(sdHome, "audit.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return nil
+	}
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if jerr := json.Unmarshal([]byte(line), &entry); jerr == nil {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// Q1 / REQ-004-022: `sd snapshot restore` emits both a snapshot-create
+// (backup) and a snapshot-restore audit event.
+func TestSnapshotRestore_AuditsCreateAndRestore(t *testing.T) {
+	withFixedPreRestoreTag(t, "pre-restore-20260520-101010")
+	mb := newMockSnapshotBackend()
+	addVMToMock(mb, "testvm")
+	mb.snapshots["testvm"]["v1"] = backend.SnapshotInfo{Name: "v1"}
+	setupSnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"snapshot", "restore", "testvm", "--tag", "v1"})
+	require.NoError(t, root.Execute())
+
+	events := readAuditEvents(t)
+	var sawCreate, sawRestore bool
+	for _, e := range events {
+		if e["event"] == "snapshot-create" && e["vm"] == "testvm" {
+			sawCreate = true
+		}
+		if e["event"] == "snapshot-restore" && e["vm"] == "testvm" {
+			sawRestore = true
+		}
+	}
+	assert.True(t, sawCreate, "snapshot restore must emit snapshot-create (backup) audit event")
+	assert.True(t, sawRestore, "snapshot restore must emit snapshot-restore audit event")
+}
+
+// Q1 / REQ-004-022: standalone `sd snapshot create` MUST emit a
+// snapshot-create audit event (was missing in wave 4).
+func TestSnapshotCreate_AuditsSnapshotCreate(t *testing.T) {
+	mb := newMockSnapshotBackend()
+	addVMToMock(mb, "testvm")
+	setupSnapshotTest(t, mb)
+
+	root := RootCmd()
+	root.SetArgs([]string{"snapshot", "create", "testvm", "--tag", "manual-tag"})
+	require.NoError(t, root.Execute())
+
+	events := readAuditEvents(t)
+	var saw bool
+	for _, e := range events {
+		if e["event"] == "snapshot-create" && e["vm"] == "testvm" {
+			if meta, ok := e["meta"].(map[string]any); ok {
+				if meta["tag"] == "manual-tag" {
+					saw = true
+				}
+			}
+		}
+	}
+	assert.True(t, saw, "standalone snapshot create must emit snapshot-create audit event with tag")
 }

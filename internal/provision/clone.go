@@ -58,7 +58,7 @@ fi`, qTarget, qTarget, qTarget)
 			return fmt.Errorf("clone target %s exists with different remote %q (expected %q)", target, existingRemote, repo)
 		}
 		// Fetch and optionally checkout the branch.
-		fetchScript := fmt.Sprintf("set -eux -o pipefail\ngit -C %s fetch", qTarget)
+		fetchScript := fmt.Sprintf("set -eu -o pipefail\ngit -C %s fetch", qTarget)
 		if branch != "" {
 			fetchScript += fmt.Sprintf("\ngit -C %s checkout %s", qTarget, qBranch)
 		}
@@ -73,7 +73,7 @@ fi`, qTarget, qTarget, qTarget)
 	default:
 		// Clone fresh.
 		// Fix 3: Check mkdir error instead of silently discarding it.
-		mkdirScript := "set -eux -o pipefail\nmkdir -p ~/projects"
+		mkdirScript := "set -eu -o pipefail\nmkdir -p ~/projects"
 		_, mkdirStderr, mkdirExit, mkdirErr := execFn(ctx, vmName, []string{"bash", "-c", mkdirScript})
 		if mkdirErr != nil {
 			return fmt.Errorf("git clone failed for %q: mkdir ~/projects: %v", repo, mkdirErr)
@@ -83,7 +83,7 @@ fi`, qTarget, qTarget, qTarget)
 				repo, mkdirExit, tailLines(mkdirStderr, 20))
 		}
 
-		cloneCmd := "set -eux -o pipefail\ngit clone"
+		cloneCmd := "set -eu -o pipefail\ngit clone"
 		if branch != "" {
 			cloneCmd += " --branch " + qBranch
 		}

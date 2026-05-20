@@ -246,7 +246,7 @@ func TestInstallPackages_ScriptHasPreamble(t *testing.T) {
 
 	for _, s := range scripts {
 		if strings.Contains(s, "apt-get") {
-			assert.True(t, strings.HasPrefix(s, "set -eux -o pipefail\n"),
+			assert.True(t, strings.HasPrefix(s, "set -eu -o pipefail\n"),
 				"install script must start with safety preamble")
 		}
 	}

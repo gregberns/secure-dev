@@ -310,12 +310,14 @@ func (b *Backend) List(ctx context.Context) ([]backend.VMInfo, error) {
 		// Get creation time.
 		createdStr, _ := dockerCmd(ctx, "inspect", "--format", "{{.Created}}", cName)
 		createdAt, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(createdStr))
+		var createdPtr *time.Time
+		if !createdAt.IsZero() { tUTC := createdAt.UTC(); createdPtr = &tUTC }
 
 		vms = append(vms, backend.VMInfo{
 			Name:      vmName,
 			Status:    mapDockerStatus(status),
 			Backend:   "docker",
-			CreatedAt: createdAt,
+			CreatedAt: createdPtr,
 		})
 	}
 

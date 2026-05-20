@@ -187,7 +187,7 @@ func formatVMDetail(vm backend.VMInfo) string {
 	if vm.IP != "" {
 		fmt.Fprintf(&buf, "IP:       %s\n", vm.IP)
 	}
-	if !vm.CreatedAt.IsZero() {
+	if vm.CreatedAt != nil && !vm.CreatedAt.IsZero() {
 		fmt.Fprintf(&buf, "Created:  %s\n", vm.CreatedAt.Format(time.RFC3339))
 	}
 	return buf.String()

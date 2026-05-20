@@ -92,7 +92,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		// REQ-004-022: Log VM lifecycle event (already running)
 		if al := AuditLog(); al != nil {
 			_ = al.LogEvent(security.EventLogEntry{
-				Timestamp: time.Now(),
+				Timestamp: time.Now().UTC(),
 				EventType: "vm.start",
 				VMName:    name,
 			})
@@ -132,7 +132,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if l := Loader(); l != nil {
 		_ = l.UpdateVMState(name, func(s *config.VMState) {
 			s.Status = config.VMStatusRunning
-			s.LastStarted = time.Now()
+			now := time.Now().UTC()
+			s.LastStarted = &now
 		})
 	}
 
@@ -144,7 +145,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// REQ-004-022: Log VM lifecycle event
 	if al := AuditLog(); al != nil {
 		_ = al.LogEvent(security.EventLogEntry{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			EventType: "vm.start",
 			VMName:    name,
 		})

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -119,6 +120,9 @@ func TestInitCommand_DetectsNodeProject(t *testing.T) {
 	assert.Contains(t, cfg.Modules, "nodejs")
 }
 
+// bug-init-not-idempotent: sd init is now idempotent. When .sd.yaml already
+// exists and --force is not passed, the command is a no-op that exits 0 with
+// a message to stderr (human mode) or a structured result on stdout (JSON).
 func TestInitCommand_NoOverwriteWithoutForce(t *testing.T) {
 	dir := setupInitTest(t)
 
@@ -126,17 +130,102 @@ func TestInitCommand_NoOverwriteWithoutForce(t *testing.T) {
 	sdYaml := filepath.Join(dir, ".sd.yaml")
 	require.NoError(t, os.WriteFile(sdYaml, []byte("name: existing\n"), 0644))
 
+	// Q3: capture BOTH stdout and stderr; stdout must be empty in human mode,
+	// stderr must contain the actionable message. Cardinal rule: stdout for
+	// data, stderr for messages.
+	oldStderr := os.Stderr
+	rErr, wErr, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stderr = wErr
+
+	oldStdout := os.Stdout
+	rOut, wOut, pipeOutErr := os.Pipe()
+	require.NoError(t, pipeOutErr)
+	os.Stdout = wOut
+
 	root := RootCmd()
 	root.SetArgs([]string{"init"})
 	err := root.Execute()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already exists")
-	assert.Contains(t, err.Error(), "--force")
+
+	wErr.Close()
+	wOut.Close()
+	os.Stderr = oldStderr
+	os.Stdout = oldStdout
+
+	var stderrBuf, stdoutBuf bytes.Buffer
+	_, _ = stderrBuf.ReadFrom(rErr)
+	_, _ = stdoutBuf.ReadFrom(rOut)
+
+	// Idempotent: no error, exit 0.
+	require.NoError(t, err, "init with existing .sd.yaml must be a no-op, not an error")
+	// Q3: human no-op must keep stdout empty.
+	assert.Empty(t, strings.TrimSpace(stdoutBuf.String()),
+		"human no-op must write nothing to stdout (got %q)", stdoutBuf.String())
+
+	// Verify stderr message format.
+	stderrOut := stderrBuf.String()
+	assert.Contains(t, stderrOut, ".sd.yaml already exists at")
+	assert.Contains(t, stderrOut, "--force to overwrite")
+	assert.Contains(t, stderrOut, sdYaml)
 
 	// Verify existing file was not changed
 	data, readErr := os.ReadFile(sdYaml)
 	require.NoError(t, readErr)
-	assert.Contains(t, string(data), "existing")
+	assert.Equal(t, "name: existing\n", string(data),
+		"existing .sd.yaml must be byte-for-byte preserved on no-op")
+}
+
+// bug-init-not-idempotent: JSON mode no-op variant.
+func TestInitCommand_NoOverwriteWithoutForce_JSON(t *testing.T) {
+	dir := setupInitTest(t)
+
+	sdYaml := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(sdYaml, []byte("name: existing\n"), 0644))
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	// Q3: in JSON mode stderr must be empty (no human message duplicated).
+	oldStderr := os.Stderr
+	rErr, wErr, pipeErrErr := os.Pipe()
+	require.NoError(t, pipeErrErr)
+	os.Stderr = wErr
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "init"})
+	execErr := root.Execute()
+
+	w.Close()
+	wErr.Close()
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	var buf, stderrBuf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	_, _ = stderrBuf.ReadFrom(rErr)
+
+	require.NoError(t, execErr, "init with existing .sd.yaml in --json mode must be a no-op")
+	// Q3: JSON mode must not duplicate the message on stderr.
+	assert.Empty(t, strings.TrimSpace(stderrBuf.String()),
+		"JSON no-op must keep stderr empty (got %q)", stderrBuf.String())
+
+	var envelope map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &envelope),
+		"JSON output must be valid: %s", buf.String())
+	assert.True(t, envelope["ok"].(bool))
+	data := envelope["data"].(map[string]any)
+	// A2: unified envelope — `action` is the discriminator across noop/create/overwrote.
+	assert.Equal(t, "noop", data["action"])
+	assert.Equal(t, sdYaml, data["path"])
+	assert.Equal(t, "", data["name"], "no-op envelope still carries name field (empty)")
+	assert.NotNil(t, data["modules"], "no-op envelope still carries modules field (empty)")
+
+	// Existing file unchanged.
+	existing, readErr := os.ReadFile(sdYaml)
+	require.NoError(t, readErr)
+	assert.Equal(t, "name: existing\n", string(existing))
 }
 
 func TestInitCommand_ForceOverwrite(t *testing.T) {
@@ -155,6 +244,47 @@ func TestInitCommand_ForceOverwrite(t *testing.T) {
 	data, readErr := os.ReadFile(sdYaml)
 	require.NoError(t, readErr)
 	assert.NotContains(t, string(data), "existing")
+}
+
+// bug-init-not-idempotent: --force in JSON mode still overwrites and emits
+// the regular success envelope (not the no-op envelope).
+func TestInitCommand_ForceOverwrite_JSON(t *testing.T) {
+	dir := setupInitTest(t)
+
+	sdYaml := filepath.Join(dir, ".sd.yaml")
+	require.NoError(t, os.WriteFile(sdYaml, []byte("name: existing\n"), 0644))
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "init", "--force"})
+	execErr := root.Execute()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	require.NoError(t, execErr)
+
+	var envelope map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &envelope),
+		"JSON output must be valid: %s", buf.String())
+	assert.True(t, envelope["ok"].(bool))
+	data := envelope["data"].(map[string]any)
+	// A2: unified envelope — overwrite emits action=overwrote.
+	assert.Equal(t, "overwrote", data["action"])
+	assert.NotEmpty(t, data["path"])
+	assert.NotEmpty(t, data["name"])
+
+	// File was actually overwritten.
+	contents, readErr := os.ReadFile(sdYaml)
+	require.NoError(t, readErr)
+	assert.NotContains(t, string(contents), "existing")
 }
 
 func TestInitCommand_ExplicitModules(t *testing.T) {
@@ -412,7 +542,8 @@ func TestProperty_InitAlwaysProducesValidYAML(t *testing.T) {
 }
 
 // Property: sd init never overwrites an existing .sd.yaml without --force.
-// For any existing content, running init without --force preserves the original.
+// For any existing content, running init without --force is a no-op (exits 0,
+// per bug-init-not-idempotent) and preserves the original byte-for-byte.
 func TestProperty_InitNeverOverwritesWithoutForce(t *testing.T) {
 	contentGen := rapid.StringMatching(`name: [a-z]{3,10}\nmodules:\n  - [a-z]{3,8}\n`)
 
@@ -423,13 +554,21 @@ func TestProperty_InitNeverOverwritesWithoutForce(t *testing.T) {
 		sdYaml := filepath.Join(dir, ".sd.yaml")
 		require.NoError(t, os.WriteFile(sdYaml, []byte(originalContent), 0644))
 
+		// Swallow stderr so rapid output isn't polluted by the no-op message.
+		oldStderr := os.Stderr
+		_, wErr, pipeErr := os.Pipe()
+		require.NoError(t, pipeErr)
+		os.Stderr = wErr
+
 		root := RootCmd()
 		root.SetArgs([]string{"init"})
 		err := root.Execute()
 
-		// Must fail with file_exists error
-		require.Error(t, err, "init without --force must fail when .sd.yaml exists")
-		assert.Contains(t, err.Error(), "already exists")
+		wErr.Close()
+		os.Stderr = oldStderr
+
+		// Idempotent no-op: exits 0.
+		require.NoError(t, err, "init without --force must be a no-op when .sd.yaml exists")
 
 		// Original content must be unchanged
 		data, readErr := os.ReadFile(sdYaml)

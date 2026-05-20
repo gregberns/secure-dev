@@ -406,3 +406,53 @@ func TestProperty_ProbeDefaultsIdempotent(t *testing.T) {
 		}
 	})
 }
+
+// TestDefaultModuleNames_SecurityBaseline is a regression guard for SEC-001 /
+// REQ-004-006. Every VM created by `sd create` (no --modules flag) MUST be
+// default-deny at the network layer. dns-filter (REQ-004-025) and egress
+// (REQ-004-006, REQ-004-007) MUST be in DefaultModuleNames. If this test
+// fails, do NOT change the assertion -- restore the modules or update spec 004
+// (and re-run the security review).
+func TestDefaultModuleNames_SecurityBaseline(t *testing.T) {
+	required := map[string]string{
+		"base":          "REQ-006-002: every module depends transitively on base",
+		"ssh-hardening": "REQ-004-026: SSH port forwarding restrictions",
+		"dns-filter":    "REQ-004-025: local filtering DNS resolver",
+		"egress":        "REQ-004-006/007: default-deny egress firewall + allowlist",
+	}
+	present := make(map[string]bool, len(DefaultModuleNames))
+	for _, name := range DefaultModuleNames {
+		present[name] = true
+	}
+	for name, why := range required {
+		assert.Truef(t, present[name],
+			"SECURITY REGRESSION: DefaultModuleNames is missing %q (%s). "+
+				"Default-deny posture broken. See specs/004-security.md and "+
+				"docs/security-004-revival-audit.md SEC-001. Current set: %v",
+			name, why, DefaultModuleNames)
+	}
+}
+
+// TestDefaultModuleNames_ResolveOrdering verifies the baseline modules
+// resolve with correct topo order. REQ-004-006.
+func TestDefaultModuleNames_ResolveOrdering(t *testing.T) {
+	modules, err := LoadBuiltinModules()
+	require.NoError(t, err)
+
+	resolved, err := ResolveRequested(modules, DefaultModuleNames)
+	require.NoError(t, err)
+
+	pos := make(map[string]int, len(resolved))
+	for i, m := range resolved {
+		pos[m.Name] = i
+	}
+
+	for _, name := range []string{"base", "ssh-hardening", "dns-filter", "egress"} {
+		_, ok := pos[name]
+		require.Truef(t, ok, "resolved set must contain %q (got %d modules)", name, len(resolved))
+	}
+
+	assert.Less(t, pos["base"], pos["dns-filter"], "base before dns-filter")
+	assert.Less(t, pos["base"], pos["egress"], "base before egress")
+	assert.Less(t, pos["dns-filter"], pos["egress"], "dns-filter before egress")
+}

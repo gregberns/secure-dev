@@ -70,11 +70,15 @@ type VMConfig struct {
 
 // VMState tracks the runtime state of a VM instance.
 // REQ-005-007
+//
+// All timestamp fields are *time.Time + omitempty so "never happened" is
+// distinguishable from a zero/epoch value across the YAML and JSON wire
+// formats. Mirrors backend.VMInfo.
 type VMState struct {
-	Status      string    `yaml:"status"`
-	CreatedAt   time.Time `yaml:"created_at"`
-	LastStarted time.Time `yaml:"last_started,omitempty"`
-	LastStopped time.Time `yaml:"last_stopped,omitempty"`
+	Status      string     `yaml:"status"                  json:"status"`
+	CreatedAt   *time.Time `yaml:"created_at,omitempty"    json:"created_at,omitempty"`
+	LastStarted *time.Time `yaml:"last_started,omitempty"  json:"last_started,omitempty"`
+	LastStopped *time.Time `yaml:"last_stopped,omitempty"  json:"last_stopped,omitempty"`
 }
 
 // VMStatus valid values.

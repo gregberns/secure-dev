@@ -92,7 +92,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 		// REQ-004-022: Log VM lifecycle event (already stopped)
 		if al := AuditLog(); al != nil {
 			_ = al.LogEvent(security.EventLogEntry{
-				Timestamp: time.Now(),
+				Timestamp: time.Now().UTC(),
 				EventType: "vm.stop",
 				VMName:    name,
 			})
@@ -125,14 +125,15 @@ func runStop(cmd *cobra.Command, args []string) error {
 	if l := Loader(); l != nil {
 		_ = l.UpdateVMState(name, func(s *config.VMState) {
 			s.Status = config.VMStatusStopped
-			s.LastStopped = time.Now()
+			now := time.Now().UTC()
+			s.LastStopped = &now
 		})
 	}
 
 	// REQ-004-022: Log VM lifecycle event
 	if al := AuditLog(); al != nil {
 		_ = al.LogEvent(security.EventLogEntry{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			EventType: "vm.stop",
 			VMName:    name,
 		})

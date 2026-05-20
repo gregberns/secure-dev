@@ -647,3 +647,100 @@ func BenchmarkListJSON(b *testing.B) {
 		f.SuccessData(vms, func() string { return "" })
 	}
 }
+
+// Q2 / bug-no-prune-command: list must emit an actionable hint when orphan
+// state directories exist, pointing the user at `sd prune` to clean them.
+func TestList_OrphanHintPointsAtPrune(t *testing.T) {
+	setupListTest(t)
+	sdHome := os.Getenv("SD_HOME")
+	require.NoError(t, os.MkdirAll(sdHome, 0o700))
+
+	// Seed an orphan state directory not present in the memory backend.
+	orphanDir := fmt.Sprintf("%s/vms/orphan-vm", sdHome)
+	require.NoError(t, os.MkdirAll(orphanDir, 0o700))
+	require.NoError(t, os.WriteFile(orphanDir+"/config.yaml", []byte("name: orphan-vm\n"), 0o600))
+
+	// Capture stderr (progress hints go to stderr).
+	oldStderr := os.Stderr
+	rErr, wErr, perr := os.Pipe()
+	require.NoError(t, perr)
+	os.Stderr = wErr
+
+	root := RootCmd()
+	root.SetArgs([]string{"list"})
+	require.NoError(t, root.Execute())
+
+	wErr.Close()
+	os.Stderr = oldStderr
+
+	var stderrBuf bytes.Buffer
+	_, _ = stderrBuf.ReadFrom(rErr)
+	output := stderrBuf.String()
+	assert.Contains(t, output, "sd prune", "orphan-hint must reference sd prune")
+	assert.Contains(t, output, "orphan", "orphan-hint must call out orphan(s)")
+}
+
+// Q2 / bug-created-at-zero: when backend.List returns nil CreatedAt, the
+// list command must overlay State.CreatedAt from the persisted config.
+func TestList_CreatedAtOverlayFromState(t *testing.T) {
+	mb := setupListTest(t)
+	require.NoError(t, mb.Create(context.Background(), "alive", backend.VMConfig{
+		CPUs: 4, Memory: "8GiB", Disk: "100GiB", BaseImage: "ubuntu:24.04",
+	}))
+	// Force backend CreatedAt to nil by writing the per-VM config separately
+	// with a known timestamp, and clearing any backend timestamp via Reset.
+	// Memory backend always sets CreatedAt; for the overlay path we need a
+	// backend whose List() returns nil. Use a minimal overriding backend.
+	overlayTime := "2026-04-15T12:34:56Z"
+
+	// Persist a VM config with state.created_at set so list overlay picks it up.
+	sdHome := os.Getenv("SD_HOME")
+	vmDir := fmt.Sprintf("%s/vms/alive", sdHome)
+	require.NoError(t, os.MkdirAll(vmDir, 0o700))
+	cfgYAML := fmt.Sprintf("name: alive\nbackend: memory\ncpus: 4\nmemory: 8GiB\ndisk: 100GiB\nimage: ubuntu:24.04\nstate:\n  status: running\n  created_at: %s\n", overlayTime)
+	require.NoError(t, os.WriteFile(vmDir+"/config.yaml", []byte(cfgYAML), 0o600))
+
+	// Swap getBackendFunc to a wrapper that strips CreatedAt to nil.
+	origGet := getBackendFunc
+	getBackendFunc = func(_ string) (backend.Backend, error) {
+		return &nilCreatedAtBackend{Backend: mb}, nil
+	}
+	t.Cleanup(func() { getBackendFunc = origGet })
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	root := RootCmd()
+	root.SetArgs([]string{"--json", "list"})
+	require.NoError(t, root.Execute())
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	var env struct {
+		OK   bool              `json:"ok"`
+		Data []backend.VMInfo  `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &env), "json: %s", buf.String())
+	require.Len(t, env.Data, 1)
+	require.NotNil(t, env.Data[0].CreatedAt, "list must overlay CreatedAt from state")
+	assert.Equal(t, "2026-04-15", env.Data[0].CreatedAt.Format("2006-01-02"))
+}
+
+// nilCreatedAtBackend wraps a backend and forces VMInfo.CreatedAt to nil so
+// the list-overlay code path is exercised.
+type nilCreatedAtBackend struct {
+	backend.Backend
+}
+
+func (n *nilCreatedAtBackend) List(ctx context.Context) ([]backend.VMInfo, error) {
+	vms, err := n.Backend.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range vms {
+		vms[i].CreatedAt = nil
+	}
+	return vms, nil
+}

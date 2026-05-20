@@ -101,17 +101,49 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// REQ-004-019: Auto-snapshot before destructive operations
+	// REQ-004-019: Auto-snapshot before destructive operations.
+	// Snapshot failure is fatal unless --no-snapshot was explicitly passed
+	// (see specs/004-security.md "Snapshot Creation Failure" — severity: Fatal).
 	noSnapshot, _ := cmd.Flags().GetBool("no-snapshot")
 	snapshotTag := ""
 	if !noSnapshot {
 		if s, ok := b.(backend.Snapshotter); ok {
 			snapshotTag = autoSnapshotTag(name)
 			f.Progress(fmt.Sprintf("Creating safety snapshot %q for VM %q...", snapshotTag, name))
-			if err := s.SnapshotCreate(cmd.Context(), name, snapshotTag); err != nil {
-				// Snapshot failure is a non-fatal warning; proceed with destroy
-				f.Progress(fmt.Sprintf("Warning: failed to create safety snapshot: %v", err))
-				snapshotTag = ""
+			snapErr := s.SnapshotCreate(cmd.Context(), name, snapshotTag)
+			// REQ-004-022: audit snapshot-create outcome regardless of success/failure.
+			if al := AuditLog(); al != nil {
+				meta := map[string]string{
+					"tag":       snapshotTag,
+					"operation": "destroy",
+				}
+				eventType := "snapshot-create"
+				if snapErr != nil {
+					meta["error"] = snapErr.Error()
+					eventType = "snapshot-create-failed"
+				}
+				_ = al.LogEvent(security.EventLogEntry{
+					Timestamp: time.Now().UTC(),
+					EventType: eventType,
+					VMName:    name,
+					Metadata:  meta,
+				})
+			}
+			if snapErr != nil {
+				// Surface canonical vm_not_found rather than masking as snapshot_failed.
+				if errors.Is(snapErr, backend.ErrVMNotFound) {
+					return ui.CLIError{
+						Code:    "vm_not_found",
+						Message: fmt.Sprintf("VM %q does not exist", name),
+					}
+				}
+				// REQ-004-019: destroy MUST NOT proceed if safety snapshot fails.
+				return ui.CLIError{
+					Code: "snapshot_failed",
+					Message: fmt.Sprintf(
+						"failed to create safety snapshot before destroy: %v. The destroy operation has been aborted. Free disk space and retry, or use --no-snapshot to skip (not recommended).",
+						snapErr),
+				}
 			}
 		}
 	}
@@ -163,7 +195,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	// REQ-004-022: Log VM lifecycle event
 	if al := AuditLog(); al != nil {
 		_ = al.LogEvent(security.EventLogEntry{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			EventType: "vm.destroy",
 			VMName:    name,
 		})

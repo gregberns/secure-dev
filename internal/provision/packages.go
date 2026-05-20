@@ -95,7 +95,7 @@ func tailLines(s string, n int) string {
 // InstallPackages validates prerequisites and installs packages in the
 // fixed order: apt, pip, npm, go, cargo.
 // REQ-009-005: Prerequisite validation before installation.
-// REQ-009-006: Package installation with set -eux -o pipefail.
+// REQ-009-006: Package installation with set -eu -o pipefail.
 // REQ-009-013: Fail-fast with last 20 lines on error.
 func InstallPackages(ctx context.Context, execFn ExecFunc, vmName string, pkgs *config.PackageConfig) error {
 	if pkgs == nil {
@@ -129,7 +129,7 @@ func InstallPackages(ctx context.Context, execFn ExecFunc, vmName string, pkgs *
 
 		// Run update command if defined (e.g., apt-get update).
 		if mgr.UpdateCommand != "" {
-			script := "set -eux -o pipefail\n" + mgr.UpdateCommand
+			script := "set -eu -o pipefail\n" + mgr.UpdateCommand
 			cmd := []string{"bash", "-c", script}
 			_, stderr, exitCode, err := execFn(ctx, vmName, cmd)
 			if err != nil {
@@ -148,7 +148,7 @@ func InstallPackages(ctx context.Context, execFn ExecFunc, vmName string, pkgs *
 			for i, p := range pkgList {
 				quoted[i] = shellQuote(p)
 			}
-			script := "set -eux -o pipefail\n" + mgr.InstallCommand + " " + strings.Join(quoted, " ")
+			script := "set -eu -o pipefail\n" + mgr.InstallCommand + " " + strings.Join(quoted, " ")
 			cmd := []string{"bash", "-c", script}
 			_, stderr, exitCode, err := execFn(ctx, vmName, cmd)
 			if err != nil {
@@ -162,7 +162,7 @@ func InstallPackages(ctx context.Context, execFn ExecFunc, vmName string, pkgs *
 			// Per-package: one invocation per package (e.g., go install).
 			// Shell-quote each package name to prevent injection.
 			for _, pkg := range pkgList {
-				script := "set -eux -o pipefail\n" + mgr.InstallCommand + " " + shellQuote(pkg)
+				script := "set -eu -o pipefail\n" + mgr.InstallCommand + " " + shellQuote(pkg)
 				cmd := []string{"bash", "-c", script}
 				_, stderr, exitCode, err := execFn(ctx, vmName, cmd)
 				if err != nil {

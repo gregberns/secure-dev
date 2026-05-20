@@ -237,12 +237,18 @@ var BuiltinModuleNames = []string{
 }
 
 // DefaultModuleNames defines the modules provisioned when no --modules flag is given.
-// Includes base infrastructure and SSH hardening (required for credential injection).
-// Network hardening (dns-filter, egress) is opt-in via --modules until fully stabilized.
-// REQ-004-026.
+// Includes base infrastructure, SSH hardening (REQ-004-026), local filtering DNS
+// resolver (REQ-004-025), and default-deny egress firewall (REQ-004-006, REQ-004-007).
+// Every VM created by `sd create` MUST be default-deny at the network layer per
+// REQ-004-006; removing dns-filter or egress from this list violates spec 004.
+// Listed order is informational; ResolveRequested topologically sorts modules
+// by depends_on (egress depends on base+dns-filter, dns-filter depends on base,
+// ssh-hardening depends on base).
 var DefaultModuleNames = []string{
 	"base",
 	"ssh-hardening",
+	"dns-filter",
+	"egress",
 }
 
 // LoadBuiltinModules reads all embedded module YAML files, parses them,

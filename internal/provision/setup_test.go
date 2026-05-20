@@ -50,7 +50,7 @@ func TestRunSetupCommands_HasPreamble(t *testing.T) {
 	err := RunSetupCommands(context.Background(), execFn, "test-vm", []string{"echo hi"})
 	require.NoError(t, err)
 	require.Len(t, scripts, 1)
-	assert.True(t, strings.HasPrefix(scripts[0], "set -eux -o pipefail\n"))
+	assert.True(t, strings.HasPrefix(scripts[0], "set -eu -o pipefail\n"))
 }
 
 func TestRunSetupCommands_RunsAsUser(t *testing.T) {
