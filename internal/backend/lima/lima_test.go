@@ -506,33 +506,18 @@ func TestLimaBackend_Available(t *testing.T) {
 	}
 }
 
-// TestLimaBackend_InterfaceContract verifies Lima backend implements Backend.
+// TestLimaBackend_InterfaceContract_Compile verifies Lima backend implements Backend.
 // REQ-003-001, REQ-003-014
-func TestLimaBackend_InterfaceContract(t *testing.T) {
+//
+// This is a compile-time check only — it does not exercise the real limactl
+// binary. The full method-call smoke test lives in lima_integration_test.go
+// behind the `integration_lima` build tag because it shells out to a real
+// limactl install and can take many minutes (or hang) on hosts where Lima is
+// not installed or is misconfigured.
+func TestLimaBackend_InterfaceContract_Compile(t *testing.T) {
 	b := New()
-
-	// Verify it satisfies the Backend interface
 	var _ backend.Backend = b
-
-	// Verify it can be registered
-	ctx := context.Background()
-
-	// These calls verify methods exist (they will return ErrNotImplemented)
-	cfg := backend.VMConfig{
-		CPUs:      4,
-		Memory:    "8GiB",
-		Disk:      "100GiB",
-		BaseImage: "ubuntu:24.04",
-	}
-
-	b.Create(ctx, "test", cfg)
-	b.Start(ctx, "test")
-	b.Stop(ctx, "test")
-	b.Destroy(ctx, "test")
-	b.Status(ctx, "test")
-	b.List(ctx)
-	b.SSHConfig(ctx, "test")
-	b.Exec(ctx, "test", []string{"test"})
+	_ = context.Background()
 }
 
 // TestLimaYAML_ComplexProvisioningScript verifies multiline scripts work.

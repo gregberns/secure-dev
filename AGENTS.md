@@ -40,42 +40,48 @@ go.sum
 
 ## Planning with kerf
 
-This project uses kerf for structured planning. Before implementing non-trivial
-changes (new features, refactors, bug investigations), create a kerf work:
+This project uses kerf for structured planning. Before non-trivial changes, create a kerf work:
 
-  kerf new <codename>
+  kerf new <codename> --title "<plain-english title>" --jig <jig> [--area <area>] [--bead-filter <expr>]
 
-This creates a work on the bench and shows the process to follow. The jig
-(process template) guides you through structured passes -- problem space,
-decomposition, research, detailed spec, integration, and tasks.
+Always pass `--title`. The codename is a handle; the title is what humans read. Kerf auto-filters beads tied to the work by codename label.
 
-### Key commands
+### Jigs (process templates)
 
-  kerf new <codename>              Create a new work
-  kerf show <codename>             See current state + jig instructions for next steps
-  kerf status <codename>           Check current status
-  kerf status <codename> <status>  Advance to next pass
-  kerf shelve <codename>           Save progress when ending a session
-  kerf resume <codename>           Pick up where you left off
-  kerf square <codename>           Verify the work is complete
-  kerf finalize <codename> --branch <name>  Package for implementation
+- `spec` -- new feature or subsystem (problem space -> decomposition -> spec -> tasks)
+- `plan` -- planning an existing spec into tasks without re-specing
+- `implementation` -- driving an approved plan to done
+- `bug` -- bug investigation and fix
+- `retrofit` -- code already exists without a spec; back-fill spec + tests (use this for drift in this repo)
+- `spike` / `explore` / `investigation` -- timeboxed research; no commit expected
 
-### When to use kerf
+### Commands
 
-- New features or subsystems -> kerf new --jig spec
-- Bug investigations -> kerf new --jig bug
-- Trivial changes (typos, one-line fixes) -> skip kerf, just make the change
+  kerf new / show / status / shelve / resume / square / finalize  -- core lifecycle
+  kerf next                       Ranked feed of what to work on
+  kerf review <codename>          Reviewer prompt for the current pass
+  kerf preview <codename>         Render the next pass's template without advancing
+  kerf doctor                     Health check (bench drift, stale works, missing artifacts)
+  kerf triage                     Sort the bench; flag works needing attention
+  kerf archive <codename>         Retire a completed/abandoned work
+  kerf map / areas                Visualize works by area
+  kerf pin <codename>             Pin a work to the top of the bench
+  kerf snapshot / history / restore   Checkpoint and roll back work state
+
+### Bench drift
+
+`kerf doctor` (and bench listings) detect uncommitted changes not tied to any work and suggest `kerf new --jig retrofit ...` to back-fill. Don't ignore this -- it's how undocumented code accumulates.
 
 ### Workflow
 
-1. kerf new <codename> -- read the output, it tells you exactly what to do
-2. Follow each pass: write the artifacts, advance status
-3. kerf show <codename> -- if you lose context, this shows where you are
-4. kerf shelve / kerf resume -- for multi-session work
-5. kerf square -- verify everything is complete
-6. kerf finalize -- package into a git branch for implementation
+1. `kerf new <codename> --title "..." --jig <jig>` -- read the output
+2. Follow each pass; advance with `kerf status`
+3. `kerf show` if you lose context; `kerf preview` to peek ahead
+4. `kerf shelve` / `kerf resume` across sessions
+5. `kerf review` before advancing past review gates
+6. `kerf square` then `kerf finalize --branch <name>`
 
-Don't skip the planning process. Measure twice, cut once.
+Trivial changes (typos, one-liners) skip kerf. Everything else: don't skip the planning process. Measure twice, cut once.
 
 ## Development Lifecycle
 
@@ -93,7 +99,7 @@ Spec -> Spec Review (3 agents) -> Plan -> Plan Review (3 agents) -> Tasks -> Tas
 | 2. Spec Review | 3 agents: architect, critic, qa | All must-fix issues resolved, status=approved |
 | 3. Plan | `plans/{yyyy}-{mm}-{name}/PLAN.md` | All reqs traced to tasks, testing plan complete |
 | 4. Plan Review | 3 agents: architect, critic, qa | All must-fix issues resolved, status=approved |
-| 5. Tasks | Beads created via `bd create` | One bead per plan task, all have acceptance criteria |
+| 5. Tasks | Beads created via `br create` | One bead per plan task, all have acceptance criteria |
 | 6. Task Review | 1 agent verifies completeness | All beads match plan and spec |
 | 7. Implement | Code + tests + review | See Implementation Process below |
 
@@ -102,7 +108,7 @@ Spec -> Spec Review (3 agents) -> Plan -> Plan Review (3 agents) -> Tasks -> Tas
 Every implementation task follows this process. The orchestrator agent manages it.
 
 ```
-1. Create bead (bd create)
+1. Create bead (br create)
 2. Implement in worktree (ntm spawn --worktrees, or Agent tool with isolation)
 3. Run tests -- all must pass
 4. STOP -- do NOT commit. Report "ready for review"
@@ -113,7 +119,7 @@ Every implementation task follows this process. The orchestrator agent manages i
 6. Fix must-fix issues from review
 7. Re-run tests
 8. Merge worktree + commit
-9. Close bead (bd close)
+9. Close bead (br close)
 ```
 
 **Rules:**
@@ -232,22 +238,23 @@ All errors must be JSON-serializable when `--json` is active.
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+This project uses **br (beads, SQLite-based v0.2+)** for issue tracking. Run `br --help` or `br robot-docs` to see full workflow context and commands.
+
+Note: An older Dolt-format tracker lived in `.beads/` and has been archived to `.beads.dolt-legacy/` for archaeology only. Do NOT read or write to `.beads.dolt-legacy/`; it is unreadable by the current `br` CLI and history was intentionally not migrated.
 
 ### Quick Reference
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
+br ready              # Find available work
+br show <id>          # View issue details
+br update <id> --claim  # Claim work
+br close <id>         # Complete work
 ```
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- Use `br` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `br robot-docs` for detailed command reference and session close protocol
 
 ## Session Completion
 
@@ -261,7 +268,6 @@ bd close <id>         # Complete work
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```

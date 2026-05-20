@@ -14,8 +14,9 @@ run-command
 # Test binary
 *.test
 
-# Property test failure artifacts
+# Property test failure artifacts (rapid replay files, any depth)
 testdata/rapid/
+**/testdata/rapid/
 
 # Output
 *.out
@@ -44,6 +45,16 @@ build/
 *.db
 .beads-credential-key
 
+# Legacy Dolt-format beads store (archived; not used by current br CLI)
+.beads.dolt-legacy/
+
 # kerf (except project-identifier)
 .kerf/
 !.kerf/project-identifier
+
+# Per-user / per-machine agent tool state and configs (may contain secrets)
+.codex/
+.ntm/
+.mcp.json
+*.mcp.json
+opencode.json
